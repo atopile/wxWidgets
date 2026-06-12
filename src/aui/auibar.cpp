@@ -26,6 +26,10 @@
 #include "wx/dcbuffer.h"
 #include "wx/frame.h"
 #include "wx/sizer.h"
+
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
 #include "wx/image.h"
 #include "wx/settings.h"
 #include "wx/menu.h"
@@ -2522,16 +2526,9 @@ void wxAuiToolBar::OnPaint(wxPaintEvent& WXUNUSED(evt))
     // Update element registry with toolbar tools (for E2E test automation).
     // Runs after every paint so position/enabled state stays current. The item
     // label encodes selection state (appended " [checked]") so tests can detect
-    // a toggled tool without changing the WasmRegisterRenderedElement signature.
-    extern void WasmRegisterRenderedElement(
-        wxWindow* parent, const char* elementType, const char* subType,
-        int index, const wxString& label, const wxString& tooltip,
-        int screenX, int screenY, int width, int height, bool enabled);
-    extern void WasmUnregisterRenderedElementsByParent(wxWindow* parent);
-
+    // a toggled tool without changing the registry signature.
     WasmUnregisterRenderedElementsByParent(this);
 
-    wxPoint screenPos = GetScreenPosition();
     for (size_t j = 0, itemCount = m_items.GetCount(); j < itemCount; ++j)
     {
         wxAuiToolBarItem& item = m_items.Item(j);
@@ -2558,19 +2555,9 @@ void wxAuiToolBar::OnPaint(wxPaintEvent& WXUNUSED(evt))
         if (isChecked)
             registryLabel += wxT(" [checked]");
 
-        WasmRegisterRenderedElement(
-            this,
-            "tool",
-            subType,
-            static_cast<int>(j),
-            registryLabel,
-            item.m_shortHelp,
-            screenPos.x + itemRect.x,
-            screenPos.y + itemRect.y,
-            itemRect.width,
-            itemRect.height,
-            isEnabled
-        );
+        wxWasmTrackElement(this, "tool", subType, static_cast<int>(j),
+                           registryLabel, item.m_shortHelp, itemRect,
+                           isEnabled);
     }
 #endif
 }
