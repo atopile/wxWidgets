@@ -11,6 +11,8 @@
 #include "wx/log.h"
 #include "wx/settings.h"
 
+#include <emscripten.h>
+
 #ifndef WX_PRECOMP
 #endif
 
@@ -59,6 +61,27 @@ extern "C" bool wxWasmGetDarkAppearance()
 
 wxColour wxSystemSettingsNative::GetColour(wxSystemColour index)
 {
+    // Hosts may provide an RGB palette keyed by wxSystemColour enum index.
+    // This keeps the generic WASM port's fallback while letting an embedding
+    // application theme DOM-backed and canvas-painted chrome consistently.
+    // Packed values are 0xRRGGBB; -1 means no override.
+    const int themed = EM_ASM_INT({
+        const palette = globalThis.wxSystemColors;
+        if (!Array.isArray(palette))
+            return -1;
+
+        const value = palette[$0];
+        return Number.isInteger(value) && value >= 0 && value <= 0xffffff
+            ? value : -1;
+    }, static_cast<int>(index));
+
+    if (themed >= 0)
+    {
+        return wxColour((themed >> 16) & 0xff,
+                        (themed >> 8) & 0xff,
+                        themed & 0xff);
+    }
+
     // Default window backgrounds come from wxSYS_COLOUR_BTNFACE — without
     // this, canvas islands and dialog bodies erase to black.
     if (wasmDarkChrome())
