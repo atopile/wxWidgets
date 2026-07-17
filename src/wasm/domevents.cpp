@@ -54,7 +54,15 @@ wxString wxDomBitmapToDataURL(const wxBitmap& bitmap)
     if ( !bitmap.IsOk() )
         return wxString();
 
-    const wxImage image = bitmap.ConvertToImage();
+    // GetWidth()/GetHeight() are logical dimensions for a scaled WASM
+    // bitmap, but the backing store contains scale-factor-sized pixel data.
+    // Export a detached copy at scale 1 so the PNG retains all of those
+    // pixels; wxDomSetImageDataURL() still sizes the <img> in logical CSS px.
+    wxBitmap exportBitmap(bitmap);
+    if ( exportBitmap.GetScaleFactor() != 1.0 )
+        exportBitmap.SetScaleFactor(1.0);
+
+    const wxImage image = exportBitmap.ConvertToImage();
     if ( !image.IsOk() )
         return wxString();
 

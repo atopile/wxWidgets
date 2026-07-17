@@ -67,6 +67,52 @@
     document.head.appendChild(style);
   })();
 
+  // wxSystemColour indices (include/wx/settings.h). C++ reads the same
+  // globalThis.wxSystemColors array in src/wasm/settings.cpp; CSS variables
+  // keep DOM-backed controls on that exact palette instead of a second,
+  // hard-coded classic-light theme.
+  var SYS = {
+    SCROLLBAR: 0, MENU: 4, WINDOW: 5, MENUTEXT: 7, WINDOWTEXT: 8,
+    ACTIVEBORDER: 10, HIGHLIGHT: 13, HIGHLIGHTTEXT: 14, BTNFACE: 15,
+    BTNSHADOW: 16, GRAYTEXT: 17, BTNTEXT: 18, BTNHIGHLIGHT: 20,
+    INFOTEXT: 23, INFOBK: 24, LISTBOX: 25, MENUBAR: 30,
+    LISTBOXTEXT: 31
+  };
+
+  function paletteColor(index, fallback) {
+    var palette = globalThis.wxSystemColors;
+    var value = Array.isArray(palette) ? palette[index] : -1;
+    if (!Number.isInteger(value) || value < 0 || value > 0xffffff)
+      return fallback;
+    return '#' + value.toString(16).padStart(6, '0');
+  }
+
+  window.wxDomRefreshSystemColors = function () {
+    var style = document.documentElement.style;
+    var put = function (name, index, fallback) {
+      style.setProperty(name, paletteColor(index, fallback));
+    };
+    put('--wx-scrollbar', SYS.SCROLLBAR, '#d4d0c8');
+    put('--wx-menu', SYS.MENU, '#d4d0c8');
+    put('--wx-window', SYS.WINDOW, '#ffffff');
+    put('--wx-menu-text', SYS.MENUTEXT, '#000000');
+    put('--wx-window-text', SYS.WINDOWTEXT, '#000000');
+    put('--wx-border', SYS.ACTIVEBORDER, '#808080');
+    put('--wx-highlight', SYS.HIGHLIGHT, '#000080');
+    put('--wx-highlight-text', SYS.HIGHLIGHTTEXT, '#ffffff');
+    put('--wx-button-face', SYS.BTNFACE, '#d4d0c8');
+    put('--wx-button-shadow', SYS.BTNSHADOW, '#808080');
+    put('--wx-gray-text', SYS.GRAYTEXT, '#808080');
+    put('--wx-button-text', SYS.BTNTEXT, '#000000');
+    put('--wx-button-highlight', SYS.BTNHIGHLIGHT, '#ffffff');
+    put('--wx-info-text', SYS.INFOTEXT, '#000000');
+    put('--wx-info-bg', SYS.INFOBK, '#ffffe1');
+    put('--wx-listbox', SYS.LISTBOX, '#ffffff');
+    put('--wx-menubar', SYS.MENUBAR, '#d4d0c8');
+    put('--wx-listbox-text', SYS.LISTBOXTEXT, '#000000');
+  };
+  window.wxDomRefreshSystemColors();
+
   // Flag read by the C++ keyboard callback (src/wasm/app.cpp): while a DOM
   // editable owns browser focus, wx must not swallow/preventDefault keys.
   window.wxDomEditableFocused = 0;
@@ -156,7 +202,7 @@
         // Visual chrome only: the wx children of a wxStaticBox are SIBLING
         // DOM controls, so the fieldset must never intercept their input.
         root = document.createElement('fieldset');
-        root.style.border = '1px solid #b5b2aa';
+        root.style.border = '1px solid var(--wx-button-shadow)';
         root.style.borderRadius = '2px';
         label = document.createElement('legend');
         label.className = 'wx-label';
@@ -167,7 +213,7 @@
       }
       case 'statline': {
         root = document.createElement('div');
-        root.style.background = '#909090';
+        root.style.background = 'var(--wx-button-shadow)';
         root.dataset.wxChrome = '1';
         break;
       }
@@ -190,7 +236,7 @@
         root = document.createElement('div');
         root.dataset.wxScrollbar = '1';
         var sbVertical = (typeAttr === 'v');
-        root.style.background = '#e8e8e8';
+        root.style.background = 'var(--wx-scrollbar)';
         root.style.userSelect = 'none';
         var sbTrack = document.createElement('div');
         sbTrack.className = 'wx-sb-track';
@@ -198,7 +244,8 @@
         var sbThumb = document.createElement('div');
         sbThumb.className = 'wx-sb-thumb';
         sbThumb.style.cssText =
-          'position:absolute;background:#a0a0a0;border:1px solid #808080;' +
+          'position:absolute;background:var(--wx-button-shadow);' +
+          'border:1px solid var(--wx-border);' +
           'border-radius:2px;box-sizing:border-box;touch-action:none;' +
           'display:none;' +
           (sbVertical ? 'left:0;right:0;top:0;height:0;'
@@ -244,7 +291,7 @@
         // one <label><input type=radio><span></span></label> per item,
         // filled by wxDomSetItems.
         root = document.createElement('fieldset');
-        root.style.border = '1px solid #b5b2aa';
+        root.style.border = '1px solid var(--wx-button-shadow)';
         root.style.borderRadius = '2px';
         label = document.createElement('legend');
         label.className = 'wx-label';
@@ -280,8 +327,9 @@
         root = document.createElement('div');
         root.dataset.wxCheckList = '1';
         root.style.overflowY = 'auto';
-        root.style.background = '#ffffff';
-        root.style.border = '1px solid #b5b2aa';
+        root.style.background = 'var(--wx-listbox)';
+        root.style.color = 'var(--wx-listbox-text)';
+        root.style.border = '1px solid var(--wx-button-shadow)';
         break;
       }
       case 'menubar': {
@@ -289,7 +337,8 @@
         // (built by wxDomMenuSetStructure).
         root = document.createElement('div');
         root.dataset.wxMenuBar = '1';
-        root.style.background = '#d4d0c8';
+        root.style.background = 'var(--wx-menubar)';
+        root.style.color = 'var(--wx-menu-text)';
         flexCenter(root);
         break;
       }
@@ -297,7 +346,8 @@
         // Horizontal strip of tool buttons (built by wxDomToolbarSetTools).
         root = document.createElement('div');
         root.dataset.wxToolBar = '1';
-        root.style.background = '#d4d0c8';
+        root.style.background = 'var(--wx-button-face)';
+        root.style.color = 'var(--wx-button-text)';
         flexCenter(root);
         break;
       }
@@ -314,8 +364,9 @@
         strip.setAttribute('role', 'tablist');
         strip.style.cssText =
           'position:absolute;left:0;top:0;right:0;display:flex;' +
-          'align-items:flex-end;background:#d4d0c8;' +
-          'border-bottom:1px solid #808080;pointer-events:auto;' +
+          'align-items:flex-end;background:var(--wx-button-face);' +
+          'color:var(--wx-button-text);' +
+          'border-bottom:1px solid var(--wx-border);pointer-events:auto;' +
           'overflow:hidden;';
         root.appendChild(strip);
         break;
@@ -358,6 +409,7 @@
     el.style.left = '0px';
     el.style.top = '0px';
     el.style.boxSizing = 'border-box';
+    if (!el.style.color) el.style.color = 'var(--wx-button-text)';
     el.style.margin = '0';
     if (!el.style.padding) el.style.padding = '0';
     el.style.overflow = type === 'statbox' ? 'visible' : 'hidden';
@@ -376,6 +428,11 @@
     el.style.pointerEvents = el.dataset.wxChrome ? 'none' : 'auto';
 
     var valueEl = built.input || el;
+    if (valueEl.tagName === 'SELECT' || valueEl.tagName === 'TEXTAREA' ||
+        (valueEl.tagName === 'INPUT' && isEditable(valueEl))) {
+      valueEl.style.color = 'var(--wx-window-text)';
+      valueEl.style.backgroundColor = 'var(--wx-window)';
+    }
     if (built.input) inputs.set(domId, built.input);
     if (built.label) labels.set(domId, built.label);
 
@@ -409,9 +466,23 @@
       });
 
       valueEl.addEventListener('input', function () {
-        dispatch(domId, EVT.INPUT);
+        if (valueEl.tagName === 'SELECT') {
+          // Native select popups commit the picked option through `input`
+          // before `change`. Dispatch immediately: relayout or control
+          // destruction in the wx handler can otherwise make the later
+          // `change` disappear and leave the old selection active.
+          valueEl._wxSelectionDispatched = valueEl.selectedIndex;
+          dispatch(domId, EVT.CHANGE);
+        } else {
+          dispatch(domId, EVT.INPUT);
+        }
       });
       valueEl.addEventListener('change', function () {
+        if (valueEl.tagName === 'SELECT' &&
+            valueEl._wxSelectionDispatched === valueEl.selectedIndex) {
+          delete valueEl._wxSelectionDispatched;
+          return;
+        }
         dispatch(domId, EVT.CHANGE);
       });
       if (isEditable(valueEl)) {
@@ -510,7 +581,8 @@
       el.checked = !!on;
     } else {
       el.setAttribute('aria-pressed', on ? 'true' : 'false');
-      el.style.background = on ? '#b0c4de' : '';
+      el.style.background = on ? 'var(--wx-highlight)' : 'var(--wx-button-face)';
+      el.style.color = on ? 'var(--wx-highlight-text)' : 'var(--wx-button-text)';
     }
   };
 
@@ -980,7 +1052,8 @@
     items.forEach(function (it, idx) {
       if (it.kind === 'separator') {
         var sep = document.createElement('div');
-        sep.style.cssText = 'border-top:1px solid #808080;margin:2px 4px;';
+        sep.style.cssText =
+          'border-top:1px solid var(--wx-button-shadow);margin:2px 4px;';
         pop.appendChild(sep);
         return;
       }
@@ -988,15 +1061,16 @@
       row.textContent = (it.checked ? '✓ ' : '   ') + it.label +
                         (it.kind === 'submenu' ? '  ▸' : '');
       row.style.cssText = 'padding:2px 14px 2px 6px;cursor:default;' +
-                          (it.enabled ? '' : 'color:#808080;');
+                          (it.enabled ? 'color:var(--wx-menu-text);' :
+                                        'color:var(--wx-gray-text);');
       if (it.enabled) {
         row.addEventListener('mouseenter', function () {
-          row.style.background = '#000080';
-          row.style.color = '#ffffff';
+          row.style.background = 'var(--wx-highlight)';
+          row.style.color = 'var(--wx-highlight-text)';
         });
         row.addEventListener('mouseleave', function () {
           row.style.background = '';
-          row.style.color = '';
+          row.style.color = 'var(--wx-menu-text)';
         });
         row.addEventListener('click', function (ev) {
           ev.stopPropagation();
@@ -1028,8 +1102,9 @@
     pop.className = 'wx-menu-popup';
     var a = anchor.getBoundingClientRect();
     pop.style.cssText =
-      'position:absolute;z-index:10000;background:#d4d0c8;' +
-      'border:1px solid #808080;box-shadow:2px 2px 4px rgba(0,0,0,.3);' +
+      'position:absolute;z-index:10000;background:var(--wx-menu);' +
+      'color:var(--wx-menu-text);border:1px solid var(--wx-border);' +
+      'box-shadow:2px 2px 4px rgba(0,0,0,.3);' +
       'padding:2px;white-space:pre;min-width:120px;' +
       'left:' + (a.left + window.scrollX) + 'px;' +
       'top:' + (a.bottom + window.scrollY) + 'px;';
@@ -1089,8 +1164,9 @@
     var pop = document.createElement('div');
     pop.className = 'wx-menu-popup';
     pop.style.cssText =
-      'position:fixed;z-index:10000;background:#d4d0c8;' +
-      'border:1px solid #808080;box-shadow:2px 2px 4px rgba(0,0,0,.3);' +
+      'position:fixed;z-index:10000;background:var(--wx-menu);' +
+      'color:var(--wx-menu-text);border:1px solid var(--wx-border);' +
+      'box-shadow:2px 2px 4px rgba(0,0,0,.3);' +
       'padding:2px;white-space:pre;min-width:120px;left:0;top:0;';
     if (Module['canvas']) {
       pop.style.font = getComputedStyle(Module['canvas']).font;
@@ -1188,7 +1264,7 @@
       btn.textContent = m.title;
       btn.style.cssText =
         'border:none;background:transparent;padding:2px 8px;margin:0;' +
-        'font:inherit;white-space:pre;';
+        'color:var(--wx-menu-text);font:inherit;white-space:pre;';
       btn.addEventListener('mousedown', function (ev) { ev.stopPropagation(); });
       btn.addEventListener('click', function (ev) {
         ev.stopPropagation();
@@ -1226,7 +1302,8 @@
       if (t.kind === 'separator') {
         var sep = document.createElement('div');
         sep.style.cssText =
-          'border-left:1px solid #808080;align-self:stretch;margin:1px 3px;';
+          'border-left:1px solid var(--wx-button-shadow);' +
+          'align-self:stretch;margin:1px 3px;';
         el.appendChild(sep);
         return;
       }
@@ -1235,6 +1312,8 @@
       // same look as every other tooltip (no native title attribute)
       tooltipHover(btn, function () { return t.tooltip || t.label || ''; });
       btn.style.cssText = 'padding:1px 3px;margin:1px;font:inherit;' +
+                          'color:var(--wx-button-text);' +
+                          'background:var(--wx-button-face);' +
                           'display:flex;align-items:center;';
       if (t.img) {
         var img = document.createElement('img');
@@ -1247,10 +1326,12 @@
         btn.textContent = t.label || '';
       }
       btn.disabled = !t.enabled;
-      if (t.toggled) btn.style.background = '#b0c4de';
-      // Styling hook only (dark theme CSS keys off it) — the light look
-      // stays inline above.
-      if (t.toggled) btn.dataset.wxToggled = '1';
+      if (t.toggled) {
+        btn.style.background = 'var(--wx-highlight)';
+        btn.style.color = 'var(--wx-highlight-text)';
+        // Styling hook used by the dark-theme override above.
+        btn.dataset.wxToggled = '1';
+      }
       btn.addEventListener('click', function (ev) {
         ev.stopPropagation();
         el.dataset.wxLastCommand = String(t.id);
@@ -1377,13 +1458,15 @@
       btn.textContent = tab.label;
       btn.style.cssText =
         'font:inherit;margin:1px 0 0 1px;padding:2px 8px;' +
-        'border:1px solid #808080;border-bottom:none;' +
+        'color:var(--wx-button-text);' +
+        'border:1px solid var(--wx-button-shadow);border-bottom:none;' +
         'border-radius:3px 3px 0 0;white-space:pre;' +
         'overflow:hidden;text-overflow:ellipsis;' +
         'flex:0 1 auto;min-width:0;cursor:default;' +
         (tab.selected
-          ? 'background:#f5f4f2;font-weight:bold;position:relative;top:1px;'
-          : 'background:#c8c4bc;');
+          ? 'background:var(--wx-window);color:var(--wx-window-text);' +
+            'font-weight:bold;position:relative;top:1px;'
+          : 'background:var(--wx-button-face);');
       btn.addEventListener('click', function (ev) {
         ev.stopPropagation();
         el.dataset.wxLastCommand = String(idx);
@@ -1467,7 +1550,8 @@
       tooltipEl.id = 'wx-tooltip';
       tooltipEl.style.cssText =
         'position:fixed;z-index:20000;display:none;' +
-        'background:#ffffe1;color:#000;border:1px solid #000;' +
+        'background:var(--wx-info-bg);color:var(--wx-info-text);' +
+        'border:1px solid var(--wx-info-text);' +
         'padding:2px 4px;font:12px sans-serif;white-space:pre;' +
         'pointer-events:none;max-width:400px;';
       document.body.appendChild(tooltipEl);
