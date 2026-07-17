@@ -661,7 +661,11 @@ EM_BOOL KeyCallback(int eventType,
             }
             else
             {
-                preventDefault = false;
+                // The CHAR_HOOK handler consumed this key and did not allow
+                // the next wx event. Cancel the browser keydown as well, or
+                // printable keys generate a later keypress which we translate
+                // to wxEVT_CHAR and dispatch the same hotkey a second time.
+                preventDefault = true;
             }
         }
         else
