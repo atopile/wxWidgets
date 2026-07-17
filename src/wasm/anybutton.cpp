@@ -15,7 +15,7 @@
 
 wxBitmap wxAnyButton::DoGetBitmap(State state) const
 {
-    return m_bitmaps[state].GetBitmap(wxDefaultSize);
+    return m_bitmaps[state].GetBitmapFor(this);
 }
 
 void wxAnyButton::DoSetBitmap(const wxBitmapBundle& bitmap, State which)
@@ -28,7 +28,7 @@ void wxAnyButton::DoSetBitmap(const wxBitmapBundle& bitmap, State which)
     // TODO(dom-phase-3): reflect the other states (hover/pressed/disabled).
     if (which == State_Normal && WasmGetDomId())
     {
-        const wxBitmap bmp = m_bitmaps[which].GetBitmap(wxDefaultSize);
+        const wxBitmap bmp = m_bitmaps[which].GetBitmapFor(this);
         if (bmp.IsOk())
             wxDomSetImageDataURL(WasmGetDomId(), wxDomBitmapToDataURL(bmp),
                                  bmp.GetWidth(), bmp.GetHeight());

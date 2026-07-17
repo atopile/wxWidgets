@@ -197,8 +197,10 @@ void wxToolBar::WasmRebuildTools()
             img = wxDomBitmapToDataURL(bmp);
             if (!img.empty())
             {
-                imgW = bmp.GetWidth();
-                imgH = bmp.GetHeight();
+                // Bitmap dimensions are logical after bundle scaling; the
+                // encoded PNG retains the high-resolution backing pixels.
+                imgW = wxRound(bmp.GetLogicalWidth());
+                imgH = wxRound(bmp.GetLogicalHeight());
             }
         }
 
