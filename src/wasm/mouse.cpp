@@ -74,11 +74,15 @@ wxEventType GetMouseEventType(int emscriptenEventType,
     // what wxGenericListCtrl's activation logic expects.
     static double lastMouseDownTime = 0.0;
     static unsigned short lastMouseDownButton = 0xFFFF;
+    static long lastMouseDownX = 0;
+    static long lastMouseDownY = 0;
     int clickCount = 1;
     if (emscriptenEventType == EMSCRIPTEN_EVENT_MOUSEDOWN)
     {
         if (event.button == lastMouseDownButton &&
-            (event.timestamp - lastMouseDownTime) < WASM_DCLICK_MSEC)
+            (event.timestamp - lastMouseDownTime) < WASM_DCLICK_MSEC &&
+            std::abs(event.targetX - lastMouseDownX) <= 4 &&
+            std::abs(event.targetY - lastMouseDownY) <= 4)
         {
             clickCount = 2;
             // Reset so a quick third click isn't chained as another DCLICK.
@@ -89,6 +93,8 @@ wxEventType GetMouseEventType(int emscriptenEventType,
         {
             lastMouseDownTime = event.timestamp;
             lastMouseDownButton = event.button;
+            lastMouseDownX = event.targetX;
+            lastMouseDownY = event.targetY;
         }
     }
 

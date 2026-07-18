@@ -913,6 +913,33 @@
     }
   };
 
+  window.wxDomIsItemSelected = function (domId, index) {
+    var el = controls.get(domId);
+    if (!el) return false;
+    if (el.dataset.wxCheckList) {
+      var boxes = el.querySelectorAll('input[type=checkbox]');
+      return !!(boxes[index] && boxes[index].checked);
+    }
+    return !!(el.tagName === 'SELECT' && el.options[index] &&
+              el.options[index].selected);
+  };
+
+  // Map wx client coordinates to the native <option> under the pointer.
+  // DOM rectangles include native row sizing and the select's scroll offset.
+  window.wxDomListHitTest = function (domId, x, y) {
+    var el = controls.get(domId);
+    if (!el || el.tagName !== 'SELECT') return -1;
+    var root = el.getBoundingClientRect();
+    var clientX = root.left + x;
+    var clientY = root.top + y;
+    for (var i = 0; i < el.options.length; i++) {
+      var r = el.options[i].getBoundingClientRect();
+      if (clientX >= r.left && clientX < r.right &&
+          clientY >= r.top && clientY < r.bottom) return i;
+    }
+    return -1;
+  };
+
   window.wxDomGetSelectedIndices = function (domId) {
     var el = controls.get(domId);
     if (!el) return '';
@@ -1633,10 +1660,10 @@
   // Invariants (prevent double dispatch):
   //  - events targeting #canvas take only the Emscripten path;
   //  - events targeting DOM controls take only this path;
-  //  - LEFT clicks on interactive controls take only the native control
-  //    path (their click listeners + wx_dom_event); we forward left
-  //    clicks only for passive controls (dataset.wxPassive: statictext,
-  //    gauge), middle/right always.
+  //  - Native control click/change events and wx mouse down/up are distinct
+  //    wx event types. Forward all buttons for DOM controls so application
+  //    wxEVT_LEFT_DOWN handlers still run; the native click listener remains
+  //    the sole source of command events such as wxEVT_BUTTON.
   // NOTE: listeners that stopPropagation on mousedown (menubar titles)
   // intentionally opt out of forwarding.
 
@@ -1658,6 +1685,7 @@
          Math.round(ev.clientY - canvasRect.top),
          ev.button | 0, ev.buttons | 0, ev.detail | 0, mods, deltaY || 0]);
     } catch (e) {
+      console.error('[wx-dom] wx_dom_mouse failed:', e);
       return 0;
     }
   }
@@ -1687,13 +1715,13 @@
   document.addEventListener('mousedown', function (ev) {
     var ctl = forwardTarget(ev);
     if (!ctl) return;
-    if (ev.button !== 0 || ctl.dataset.wxPassive) wxForwardMouse(ev, 2, 0);
+    wxForwardMouse(ev, 2, 0);
   });
 
   document.addEventListener('mouseup', function (ev) {
     var ctl = forwardTarget(ev);
     if (!ctl) return;
-    if (ev.button !== 0 || ctl.dataset.wxPassive) wxForwardMouse(ev, 3, 0);
+    wxForwardMouse(ev, 3, 0);
   });
 
   document.addEventListener('wheel', function (ev) {
