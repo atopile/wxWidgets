@@ -63,6 +63,7 @@ protected:
     // checkbox-row list instead of the <select multiple>.
     virtual const char *WasmDomNodeType() const { return "listbox"; }
 
+    virtual int DoListHitTest(const wxPoint& point) const wxOVERRIDE;
     virtual void DoSetFirstItem(int n) wxOVERRIDE;
 
     virtual void DoSetSelection(int n, bool select) wxOVERRIDE;
