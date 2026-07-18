@@ -531,7 +531,7 @@ int ConvertStringToBuf(const wxString& s, char *out, size_t outsize)
     {
         memcpy(out, buf, len+1);
     }
-    else // not enough space
+    else if ( outsize > 0 ) // not enough space
     {
         memcpy(out, buf, outsize-1);
         out[outsize-1] = '\0';
@@ -550,7 +550,7 @@ int ConvertStringToBuf(const wxString& s, wchar_t *out, size_t outsize)
     {
         memcpy(out, buf, (len+1) * sizeof(wchar_t));
     }
-    else // not enough space
+    else if ( outsize > 0 ) // not enough space
     {
         memcpy(out, buf, (outsize-1) * sizeof(wchar_t));
         out[outsize-1] = 0;
@@ -631,7 +631,8 @@ int wxVsnprintf(char *str, size_t size, const wxString& format, va_list argptr)
 
     // VsnprintfTestCase reveals that glibc's implementation of vswprintf
     // doesn't nul terminate on truncation.
-    str[size - 1] = 0;
+    if ( size )
+        str[size - 1] = 0;
 
     return rv;
 }
