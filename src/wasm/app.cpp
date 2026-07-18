@@ -624,8 +624,15 @@ EM_BOOL KeyCallback(int eventType,
     }
 
     wxApp* app = static_cast<wxApp*>(userData);
+    // Printable browser keys normally arrive as keydown followed by keypress.
+    // Build the complete wx sequence from keydown and consume the later DOM
+    // keypress. This is deterministic across browsers and, importantly, keeps
+    // applications which bind both CHAR_HOOK and CHAR (KiCad) from seeing one
+    // physical hotkey twice if a browser still emits keypress.
+    if (eventType == EMSCRIPTEN_EVENT_KEYPRESS)
+        return EM_TRUE;
+
     wxKeyEvent event;
-    bool preventDefault = true;
 
     if (EmscriptenKeyboardEventToWXEvent(eventType, *emscriptenEvent, &event))
     {
@@ -644,28 +651,20 @@ EM_BOOL KeyCallback(int eventType,
             if (!app->HandleKeyEvent(&charHookEvent) ||
                 charHookEvent.IsNextEventAllowed())
             {
-                // The browser does not generate char events for some key codes
-                if (KeyCodeNeedsCharEvent(event.GetKeyCode()))
+                if (!app->HandleKeyEvent(&event))
                 {
-                    if (!app->HandleKeyEvent(&event))
+                    // Use the browser's translated key value for CHAR (e.g.
+                    // lowercase 'r'), while KEY_DOWN/CHAR_HOOK retain the
+                    // physical-key code ('R'). Previously printable CHAR was
+                    // deferred to DOM keypress while special keys were
+                    // synthesized here, which allowed the two paths to diverge.
+                    wxKeyEvent charEvent;
+                    if (EmscriptenKeyboardEventToWXEvent(
+                            EMSCRIPTEN_EVENT_KEYPRESS, *emscriptenEvent, &charEvent))
                     {
-                        wxKeyEvent charEvent(wxEVT_CHAR, event);
                         app->HandleKeyEvent(&charEvent);
                     }
                 }
-                else
-                {
-                    // By default, emscripten generates char events
-                    preventDefault = app->HandleKeyEvent(&event);
-                }
-            }
-            else
-            {
-                // The CHAR_HOOK handler consumed this key and did not allow
-                // the next wx event. Cancel the browser keydown as well, or
-                // printable keys generate a later keypress which we translate
-                // to wxEVT_CHAR and dispatch the same hotkey a second time.
-                preventDefault = true;
             }
         }
         else
@@ -674,7 +673,10 @@ EM_BOOL KeyCallback(int eventType,
         }
     }
 
-    return preventDefault;
+    // The wx sequence above completely owns non-editable keyboard input. In
+    // particular, cancelling keydown prevents a browser-generated keypress;
+    // the explicit keypress guard above covers engines which still emit it.
+    return EM_TRUE;
 }
 
 EM_BOOL MouseCallback(int eventType,
