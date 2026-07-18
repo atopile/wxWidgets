@@ -11,23 +11,16 @@
 
 #include "wx/listbox.h"
 
-#include "wx/tokenzr.h"
 #include "wx/wasm/private/dom.h"
 
 #define INVALID_INDEX_MESSAGE wxT("invalid listbox index")
 
-// Parse wxDomGetSelectedIndices()'s comma-joined string ("" = none).
-static void wxParseSelectedIndices(const wxString& joined, wxArrayInt& out)
+static void wxReadSelectedIndices(const wxListBox& list, wxArrayInt& out)
 {
     out.clear();
-
-    wxStringTokenizer tok(joined, wxT(","));
-    while (tok.HasMoreTokens())
-    {
-        long n;
-        if (tok.GetNextToken().ToLong(&n))
-            out.push_back(n);
-    }
+    for (unsigned int i = 0; i < list.GetCount(); ++i)
+        if (wxDomIsItemSelected(list.WasmGetDomId(), i))
+            out.push_back(i);
 }
 
 wxListBox::wxListBox()
@@ -130,8 +123,7 @@ bool wxListBox::IsSelected(int n) const
     if (WasmGetDomId())
     {
         wxArrayInt selections;
-        wxParseSelectedIndices(wxDomGetSelectedIndices(WasmGetDomId()),
-                               selections);
+        wxReadSelectedIndices(*this, selections);
         return selections.Index(n) != wxNOT_FOUND;
     }
 
@@ -145,8 +137,7 @@ int wxListBox::GetSelections(wxArrayInt& aSelections) const
     // See IsSelected(): live state wins when DOM-backed.
     if (WasmGetDomId())
     {
-        wxParseSelectedIndices(wxDomGetSelectedIndices(WasmGetDomId()),
-                               aSelections);
+        wxReadSelectedIndices(*this, aSelections);
         return aSelections.size();
     }
 
@@ -187,8 +178,7 @@ int wxListBox::GetSelection() const
     if (WasmGetDomId())
     {
         wxArrayInt selections;
-        wxParseSelectedIndices(wxDomGetSelectedIndices(WasmGetDomId()),
-                               selections);
+        wxReadSelectedIndices(*this, selections);
         return selections.empty() ? wxNOT_FOUND : selections[0];
     }
 
@@ -205,6 +195,13 @@ void wxListBox::DoSetFirstItem(int WXUNUSED(n))
 {
     // TODO(dom-phase-2): scroll the DOM element so that the item is the
     // first visible one.
+}
+
+int wxListBox::DoListHitTest(const wxPoint& point) const
+{
+    return WasmGetDomId()
+            ? wxDomListHitTest(WasmGetDomId(), point.x, point.y)
+            : wxNOT_FOUND;
 }
 
 void wxListBox::DoSetSelection(int n, bool select)
@@ -294,8 +291,7 @@ void wxListBox::OnDomEvent(wxDomEventKind kind)
         // with the first selected index, like any port does for user
         // selection.
         wxArrayInt selections;
-        wxParseSelectedIndices(wxDomGetSelectedIndices(WasmGetDomId()),
-                               selections);
+        wxReadSelectedIndices(*this, selections);
 
         for (size_t i = 0; i < m_itemsSelected.size(); ++i)
             m_itemsSelected[i] = 0;

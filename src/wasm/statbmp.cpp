@@ -53,7 +53,10 @@ void wxStaticBitmap::SetBitmap(const wxBitmapBundle& bitmap)
 
     if (WasmGetDomId())
     {
-        const wxBitmap bmp = m_bitmapBundle.GetBitmap(wxDefaultSize);
+        // Select the representation for the current display scale. The PNG
+        // keeps its physical pixels while the dimensions passed below remain
+        // logical CSS pixels.
+        const wxBitmap bmp = m_bitmapBundle.GetBitmapFor(this);
         if (bmp.IsOk())
             wxDomSetImageDataURL(WasmGetDomId(), wxDomBitmapToDataURL(bmp),
                                  bmp.GetWidth(), bmp.GetHeight());

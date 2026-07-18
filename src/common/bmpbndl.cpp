@@ -515,7 +515,6 @@ wxBitmapBundle wxBitmapBundle::FromFiles(const wxString& path, const wxString& f
     wxVector<wxBitmap> bitmaps;
 
     wxFileName fn(path, filename, extension);
-    wxString ext = extension.Lower();
 
     for ( int dpiFactor = 1 ; dpiFactor <= 2 ; ++dpiFactor)
     {
@@ -565,7 +564,15 @@ wxSize wxBitmapBundle::GetPreferredLogicalSizeFor(const wxWindow* window) const
 {
     wxCHECK_MSG( window, wxDefaultSize, "window must be valid" );
 
+#ifdef __WXWASM__
+    // Browser layout uses CSS pixels, independently of devicePixelRatio.
+    // GetPreferredBitmapSizeAtScale() returns physical asset pixels, so using
+    // it directly doubles sizer dimensions on a 2x display.
+    const double scale = window->GetDPIScaleFactor();
+    return GetPreferredBitmapSizeAtScale(scale) / scale;
+#else
     return window->FromPhys(GetPreferredBitmapSizeAtScale(window->GetDPIScaleFactor()));
+#endif
 }
 
 wxSize wxBitmapBundle::GetPreferredBitmapSizeAtScale(double scale) const

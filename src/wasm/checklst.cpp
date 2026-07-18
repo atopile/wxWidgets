@@ -11,7 +11,6 @@
 
 #include "wx/checklst.h"
 
-#include "wx/tokenzr.h"
 #include "wx/wasm/private/dom.h"
 
 #define INVALID_INDEX_MESSAGE wxT("invalid checklistbox index")
@@ -95,18 +94,8 @@ void wxCheckListBox::OnDomEvent(wxDomEventKind kind)
         if (item >= 0 && static_cast<size_t>(item) < m_itemsChecked.size())
         {
             // re-read this item's live checked state
-            m_itemsChecked[item] = 0;
-            wxStringTokenizer tok(wxDomGetSelectedIndices(WasmGetDomId()),
-                                  wxT(","));
-            while (tok.HasMoreTokens())
-            {
-                long v;
-                if (tok.GetNextToken().ToLong(&v) && v == item)
-                {
-                    m_itemsChecked[item] = 1;
-                    break;
-                }
-            }
+            m_itemsChecked[item] =
+                    wxDomIsItemSelected(WasmGetDomId(), item) ? 1 : 0;
 
             wxCommandEvent event(wxEVT_CHECKLISTBOX, GetId());
             event.SetEventObject(this);
