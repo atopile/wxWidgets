@@ -993,6 +993,17 @@
     }
   };
 
+  window.wxDomIsItemSelected = function (domId, index) {
+    var el = controls.get(domId);
+    if (!el) return false;
+    if (el.dataset.wxCheckList) {
+      var boxes = el.querySelectorAll('input[type=checkbox]');
+      return !!(boxes[index] && boxes[index].checked);
+    }
+    return !!(el.tagName === 'SELECT' && el.options[index] &&
+              el.options[index].selected);
+  };
+
   // wxListBox::HitTest: the row index under a point given in the control's
   // own client coordinates (CSS px from its top-left), -1 for none. Rows are
   // the <option>s of a <select multiple> or the row elements of a checklist;
@@ -1756,6 +1767,7 @@
          Math.round(ev.clientY - canvasRect.top),
          ev.button | 0, ev.buttons | 0, ev.detail | 0, mods, deltaY || 0]);
     } catch (e) {
+      console.error('[wx-dom] wx_dom_mouse failed:', e);
       return 0;
     }
   }

@@ -174,15 +174,10 @@ inline int wxDomListHitTest(int domId, int x, int y)
     return EM_ASM_INT({ return wxDomListHitTest($0, $1, $2); }, domId, x, y);
 }
 
-// Selected indices of a multi-select listbox, comma-joined ("" = none).
-inline wxString wxDomGetSelectedIndices(int domId)
+inline bool wxDomIsItemSelected(int domId, int index)
 {
-    char *s = (char *)EM_ASM_PTR({
-        return stringToNewUTF8(wxDomGetSelectedIndices($0));
-    }, domId);
-    wxString result = wxString::FromUTF8(s);
-    free(s);
-    return result;
+    return EM_ASM_INT({ return wxDomIsItemSelected($0, $1) ? 1 : 0; },
+                      domId, index) != 0;
 }
 
 // width/height are the wx bitmap dimensions: images load asynchronously,
