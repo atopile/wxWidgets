@@ -293,7 +293,8 @@ private:
 
 #include "wx/generic/msgdlgg.h"
 
-#if defined(__WX_COMPILING_MSGDLGG_CPP__) || defined(__WXUNIVERSAL__)
+#if defined(__WX_COMPILING_MSGDLGG_CPP__) || defined(__WXUNIVERSAL__) || \
+    defined(__WXWASM__)
 
     #define wxMessageDialog wxGenericMessageDialog
 #elif defined(__WXMSW__)

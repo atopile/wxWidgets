@@ -33,6 +33,10 @@
 #endif
 
 #include "wx/generic/treectlg.h"
+
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
 #include "wx/imaglist.h"
 #include "wx/itemattr.h"
 
@@ -1059,7 +1063,12 @@ void wxGenericTreeCtrl::InitVisualAttributes()
     m_hilightBrush = wxBrush(wxSystemSettings::GetColour(wxSYS_COLOUR_HIGHLIGHT));
     m_hilightUnfocusedBrush = wxBrush(wxSystemSettings::GetColour(wxSYS_COLOUR_BTNSHADOW));
 
-    m_dottedPen = wxPen(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT), 1, wxPENSTYLE_DOT);
+    m_dottedPen = wxPen(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT), 1,
+#ifdef __EMSCRIPTEN__
+                        wxPENSTYLE_TRANSPARENT);
+#else
+                        wxPENSTYLE_DOT);
+#endif
 
     m_boldFont = m_font.Bold();
 
@@ -2805,6 +2814,15 @@ wxGenericTreeCtrl::PaintLevel(wxGenericTreeItem *item,
         // draw
         PaintItem(item, dc);
 
+#ifdef __EMSCRIPTEN__
+        const char* const subType = item->IsExpanded() ? "expanded" :
+                                    item->HasPlus() ? "collapsed" : "leaf";
+        wxWasmTrackElement(this, "treeitem", subType, item->GetY(),
+                           item->GetText(), wxEmptyString,
+                           wxRect(item->GetX(), item->GetY(),
+                                  item->GetWidth(), h));
+#endif
+
         if (HasFlag(wxTR_ROW_LINES))
         {
             dc.SetPen(wxSystemSettings::GetColour(wxSYS_COLOUR_GRAYTEXT));
@@ -3006,6 +3024,10 @@ void wxGenericTreeCtrl::OnPaint( wxPaintEvent &WXUNUSED(event) )
 
     if ( !m_anchor)
         return;
+
+#ifdef __EMSCRIPTEN__
+    WasmUnregisterRenderedElementsByParent(this);
+#endif
 
     dc.SetPen( m_dottedPen );
 

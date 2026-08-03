@@ -62,7 +62,7 @@ protected:
 #define USE_NATIVE_FONT_DIALOG_FOR_MACOSX 0
 #endif
 
-#if defined(__WXUNIVERSAL__)
+#if defined(__WXUNIVERSAL__) || defined(__WXWASM__)
     #include "wx/generic/fontdlgg.h"
     #define wxFontDialog wxGenericFontDialog
 #elif defined(__WXMSW__)

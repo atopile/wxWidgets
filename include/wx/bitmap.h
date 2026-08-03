@@ -65,7 +65,8 @@ protected:
     defined(__WXMAC__) || \
     defined(__WXGTK__) || \
     defined(__WXX11__) || \
-    defined(__WXQT__)
+    defined(__WXQT__) || \
+    defined(__WXWASM__)
     #define wxUSE_BITMAP_BASE 1
 #else
     #define wxUSE_BITMAP_BASE 0
@@ -336,6 +337,9 @@ protected:
         #define wxBITMAP_DEFAULT_TYPE    wxBITMAP_TYPE_XPM
     #endif
     #include "wx/qt/bitmap.h"
+#elif defined(__WXWASM__)
+    #define wxBITMAP_DEFAULT_TYPE    wxBITMAP_TYPE_XPM
+    #include "wx/wasm/bitmap.h"
 #endif
 
 #if wxUSE_IMAGE

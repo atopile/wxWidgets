@@ -55,6 +55,9 @@
     #define wxICON_DEFAULT_TYPE   wxBITMAP_TYPE_XPM
   #endif
   #include "wx/generic/icon.h"
+#elif defined(__WXWASM__)
+  #define wxICON_DEFAULT_TYPE   wxBITMAP_TYPE_XPM
+  #include "wx/generic/icon.h"
 #endif
 
 #ifndef wxICON_DIFFERENT_FROM_BITMAP

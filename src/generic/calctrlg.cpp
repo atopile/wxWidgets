@@ -36,6 +36,10 @@
 #include "wx/calctrl.h"
 #include "wx/generic/calctrlg.h"
 
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
+
 #define DEBUG_PAINT 0
 
 // ----------------------------------------------------------------------------
@@ -790,6 +794,10 @@ void wxGenericCalendarCtrl::OnPaint(wxPaintEvent& WXUNUSED(event))
 {
     wxPaintDC dc(this);
 
+#ifdef __EMSCRIPTEN__
+    WasmUnregisterRenderedElementsByParent(this);
+#endif
+
     RecalcGeometry();
 
 #if DEBUG_PAINT
@@ -1024,6 +1032,16 @@ void wxGenericCalendarCtrl::OnPaint(wxPaintEvent& WXUNUSED(event))
 
                 wxCoord x = wd*m_widthCol + (m_widthCol - width) / 2 + x0;
                 dc.DrawText(dayStr, x, y + m_heightRow / 2 - height / 2);
+
+#ifdef __EMSCRIPTEN__
+                wxWasmTrackElement(this, "datecell",
+                                   isSel ? "selected" : "day",
+                                   static_cast<int>((nWeek - 1) * 7 + wd),
+                                   dayStr, date.FormatDate(),
+                                   wxRect(wd*m_widthCol + x0, y,
+                                          m_widthCol, m_heightRow),
+                                   IsDateInRange(date));
+#endif
 
                 if ( !isSel && attr && attr->HasBorder() )
                 {

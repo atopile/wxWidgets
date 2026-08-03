@@ -67,8 +67,12 @@ public:
     virtual wxString GetPlatformDescription() const override;
 #endif
 
-#if defined(__WXGTK__)
+#if defined(__WXGTK__) || defined(__WXWASM__)
     virtual bool ShowAssertDialog(const wxString& msg) override;
+#endif
+
+#if defined(__WXWASM__) && wxUSE_LOG
+    virtual wxLog *CreateLogTarget() override;
 #endif
 
 #if wxUSE_SOCKETS
@@ -91,4 +95,3 @@ public:
 #endif // wxUSE_GUI
 
 #endif // _WX_UNIX_APPTRAIT_H_
-

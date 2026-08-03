@@ -84,6 +84,8 @@ protected:
     #include "wx/osx/spinbutt.h"
 #elif defined(__WXQT__)
     #include "wx/qt/spinbutt.h"
+#elif defined(__WXWASM__)
+    #include "wx/wasm/spinbutt.h"
 #endif
 
 // ----------------------------------------------------------------------------

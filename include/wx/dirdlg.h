@@ -119,7 +119,7 @@ protected:
     #include "wx/gtk/dirdlg.h"  // Native GTK for gtk2.4
 #elif defined(__WXMAC__)
     #include "wx/osx/dirdlg.h"      // Native Mac
-#elif defined(__WXX11__)
+#elif defined(__WXX11__) || defined(__WXWASM__)
     #include "wx/generic/dirdlgg.h"     // Other ports use generic implementation
     #define wxDirDialog wxGenericDirDialog
 #elif defined(__WXQT__)

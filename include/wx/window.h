@@ -29,6 +29,8 @@
 #include "wx/validate.h"        // for wxDefaultValidator (always include it)
 #include "wx/windowid.h"
 
+#include <functional>
+
 #if wxUSE_PALETTE
     #include "wx/palette.h"
 #endif // wxUSE_PALETTE
@@ -1379,6 +1381,16 @@ public:
     bool PopupMenu(wxMenu *menu, const wxPoint& pos = wxDefaultPosition)
         { return PopupMenu(menu, pos.x, pos.y); }
     bool PopupMenu(wxMenu *menu, int x, int y);
+#ifdef __WXWASM__
+    void PopupMenu(wxMenu *menu,
+                   const wxPoint& pos,
+                   std::function<void (bool)> callback)
+        { return PopupMenu(menu, pos.x, pos.y, callback); }
+    void PopupMenu(wxMenu *menu,
+                   int x,
+                   int y,
+                   std::function<void (bool)> callback);
+#endif
 
     // simply return the id of the selected item or wxID_NONE without
     // generating any events
@@ -2008,6 +2020,9 @@ protected:
 
 #if wxUSE_MENUS
     virtual bool DoPopupMenu(wxMenu *menu, int x, int y) = 0;
+#ifdef __WXWASM__
+    virtual void DoPopupMenu(wxMenu *menu, int x, int y, std::function<void (bool)> callback) = 0;
+#endif
 #endif // wxUSE_MENUS
 
     // Makes an adjustment to the window position to make it relative to the
@@ -2111,6 +2126,13 @@ private:
         #define wxWindowQt wxWindow
     #endif // wxUniv
     #include "wx/qt/window.h"
+#elif defined(__WXWASM__)
+    #ifdef __WXUNIVERSAL__
+        #define wxWindowNative wxWindowWasm
+    #else // !wxUniv
+        #define wxWindowWasm wxWindow
+    #endif // wxUniv
+    #include "wx/wasm/window.h"
 #endif
 
 // for wxUniversal, we now derive the real wxWindow from wxWindow<platform>,

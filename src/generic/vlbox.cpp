@@ -23,6 +23,10 @@
 
 #include "wx/vlbox.h"
 
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
+
 #ifndef WX_PRECOMP
     #include "wx/settings.h"
     #include "wx/dcclient.h"
@@ -32,6 +36,10 @@
 #include "wx/dcbuffer.h"
 #include "wx/selstore.h"
 #include "wx/renderer.h"
+
+#if wxUSE_ODCOMBOBOX
+    #include "wx/odcombo.h"
+#endif
 
 // ----------------------------------------------------------------------------
 // event tables
@@ -442,6 +450,10 @@ void wxVListBox::OnPaint(wxPaintEvent& WXUNUSED(event))
     // the update rectangle
     wxRect rectUpdate = GetUpdateClientRect();
 
+#ifdef __EMSCRIPTEN__
+    WasmUnregisterRenderedElementsByParent(this);
+#endif
+
     // fill it with background colour
     dc.SetBackground(GetBackgroundColour());
     dc.Clear();
@@ -471,6 +483,20 @@ void wxVListBox::OnPaint(wxPaintEvent& WXUNUSED(event))
 
             rect.Deflate(m_ptMargins.x, m_ptMargins.y);
             OnDrawItem(dc, rect, line);
+
+#ifdef __EMSCRIPTEN__
+            wxString itemLabel = wxString::Format("Item %zu", line);
+#if wxUSE_ODCOMBOBOX
+            wxVListBoxComboPopup* const popup =
+                wxDynamicCast(this, wxVListBoxComboPopup);
+            if ( popup && popup->GetCount() > line )
+                itemLabel = popup->GetString(line);
+#endif
+            wxWasmTrackElement(this, "listboxitem",
+                               IsSelected(line) ? "selected" : "item",
+                               static_cast<int>(line), itemLabel,
+                               wxEmptyString, rectRow);
+#endif
         }
         else // no intersection
         {

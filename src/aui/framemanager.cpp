@@ -21,6 +21,10 @@
 #if wxUSE_AUI
 
 #include "wx/aui/framemanager.h"
+
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
 #include "wx/aui/dockart.h"
 #include "wx/aui/floatpane.h"
 #include "wx/aui/tabmdi.h"
@@ -748,7 +752,11 @@ unsigned int wxAuiManager::GetFlags() const
 
 /* static */ bool wxAuiManager::AlwaysUsesLiveResize(const wxWindow* WXUNUSED(window))
 {
+#ifdef __EMSCRIPTEN__
+    return true;
+#else
     return false;
+#endif
 }
 
 bool wxAuiManager::HasLiveResize() const
@@ -3308,6 +3316,60 @@ void wxAuiManager::Update()
 
 
     Repaint();
+
+#ifdef __EMSCRIPTEN__
+    WasmUnregisterRenderedElementsByParent(m_frame);
+
+    const int captionHeight = m_art
+        ? m_art->GetMetric(wxAUI_DOCKART_CAPTION_SIZE) : 20;
+    const int buttonSize = m_art
+        ? m_art->GetMetric(wxAUI_DOCKART_PANE_BUTTON_SIZE) : 16;
+
+    const int paneCount = m_panes.GetCount();
+    for ( int i = 0; i < paneCount; ++i )
+    {
+        wxAuiPaneInfo& pane = m_panes.Item(i);
+        if ( !pane.IsDocked() || !pane.IsShown() || !pane.HasCaption() )
+            continue;
+
+        const wxRect rect = pane.rect;
+        const int buttonY = rect.y + (captionHeight - buttonSize) / 2;
+
+        wxWasmTrackElement(m_frame, "auipart", "caption", i,
+                           pane.caption, wxEmptyString,
+                           wxRect(rect.x, rect.y, rect.width, captionHeight));
+
+        if ( pane.HasCloseButton() )
+            wxWasmTrackElement(m_frame, "auipart", "close", i * 10 + 1,
+                               "Close", wxEmptyString,
+                               wxRect(rect.x + rect.width - buttonSize - 4,
+                                      buttonY, buttonSize, buttonSize));
+
+        if ( pane.HasPinButton() )
+            wxWasmTrackElement(m_frame, "auipart", "pin", i * 10 + 2,
+                               "Pin", wxEmptyString,
+                               wxRect(rect.x + rect.width - buttonSize * 2 - 8,
+                                      buttonY, buttonSize, buttonSize));
+
+        if ( pane.HasMaximizeButton() )
+        {
+            const int offset = (pane.HasCloseButton() ? 1 : 0) +
+                               (pane.HasPinButton() ? 1 : 0);
+            const int buttonX = rect.x + rect.width -
+                                buttonSize * (offset + 1) - 4 * (offset + 1);
+            wxWasmTrackElement(m_frame, "auipart", "maximize", i * 10 + 3,
+                               "Maximize", wxEmptyString,
+                               wxRect(buttonX, buttonY, buttonSize, buttonSize));
+        }
+
+        const int contentHeight = rect.height - captionHeight;
+        if ( contentHeight > 0 )
+            wxWasmTrackElement(m_frame, "auipart", "content", i * 10 + 4,
+                               pane.caption, wxEmptyString,
+                               wxRect(rect.x, rect.y + captionHeight,
+                                      rect.width, contentHeight));
+    }
+#endif
 
     // set frame's minimum size
 

@@ -138,7 +138,7 @@ enum wxStockCursor
     wxCURSOR_BASED_ARROW_DOWN,
 #endif // X11
     wxCURSOR_ARROWWAIT,
-#ifdef __WXMAC__
+#if defined(__WXMAC__) || defined(__WXWASM__)
     wxCURSOR_OPEN_HAND,
     wxCURSOR_CLOSED_HAND,
 #endif
@@ -150,7 +150,7 @@ enum wxStockCursor
     #define wxCURSOR_DEFAULT        wxCURSOR_ARROW
 #endif
 
-#ifndef __WXMAC__
+#if !defined(__WXMAC__) && !defined(__WXWASM__)
     // TODO CS supply openhand and closedhand cursors
     #define wxCURSOR_OPEN_HAND      wxCURSOR_HAND
     #define wxCURSOR_CLOSED_HAND    wxCURSOR_HAND
@@ -219,7 +219,7 @@ enum wxEllipsizeMode
 #elif defined(__WXMAC__)
     // Initialize from an included XPM
     #define wxICON(X) wxIcon( X##_xpm )
-#elif defined(__WXX11__)
+#elif defined(__WXX11__) || defined(__WXWASM__)
     // Initialize from an included XPM
     #define wxICON(X) wxIcon( X##_xpm )
 #elif defined(__WXQT__)
@@ -1191,6 +1191,11 @@ extern bool WXDLLIMPEXP_CORE wxColourDisplay();
 // Returns depth of screen
 extern int WXDLLIMPEXP_CORE wxDisplayDepth();
 #define wxGetDisplayDepth wxDisplayDepth
+
+#ifdef __WXWASM__
+extern double WXDLLIMPEXP_CORE wxDisplayScaleFactor();
+extern double WXDLLIMPEXP_CORE wxContentScaleFactor();
+#endif
 
 // get the display size
 extern void WXDLLIMPEXP_CORE wxDisplaySize(int *width, int *height);

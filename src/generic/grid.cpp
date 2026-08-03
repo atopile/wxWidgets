@@ -23,6 +23,10 @@
 
 #include "wx/grid.h"
 
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
+
 #ifndef WX_PRECOMP
     #include "wx/utils.h"
     #include "wx/dcclient.h"
@@ -6724,6 +6728,10 @@ void wxGrid::DrawGridCellArea( wxDC& dc, const wxGridCellCoordsVector& cells )
     if ( !m_numRows || !m_numCols )
         return;
 
+#ifdef __EMSCRIPTEN__
+    WasmUnregisterRenderedElementsByParent(this);
+#endif
+
     int i, numCells = cells.size();
     wxGridCellCoordsVector redrawCells;
 
@@ -6888,6 +6896,10 @@ void wxGrid::DrawCell( wxDC& dc, const wxGridCellCoords& coords )
     bool isCurrent = coords == m_currentCellCoords;
 
     wxRect rect = CellToRect( row, col );
+
+#ifdef __EMSCRIPTEN__
+    wxWasmTrackGridCell(this, row, col, rect);
+#endif
 
     // if the editor is shown, we should use it and not the renderer
     // Note: However, only if it is really _shown_, i.e. not hidden!
@@ -8021,6 +8033,7 @@ void wxGrid::ShowCellEditControl()
     {
         if ( !IsVisible( m_currentCellCoords, false ) )
         {
+            HideCellEditControl();
             m_cellEditCtrlEnabled = false;
             return;
         }

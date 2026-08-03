@@ -121,6 +121,20 @@
     // If 1 then controls are refreshed after selected was drawn.
     #define wxPG_REFRESH_CONTROLS 0
 
+#elif defined(__WXWASM__)
+
+    #define wxPG_XBEFORETEXT            5
+    #define wxPG_XBEFOREWIDGET          1
+    #define wxPG_TEXTCTRLXADJUST        3
+    #define wxPG_ICON_WIDTH             9
+    #define wxPG_USE_RENDERER_NATIVE    1
+    #define wxPG_CUSTOM_IMAGE_WIDTH     20
+    #define wxPG_NO_CHILD_EVT_MOTION    1
+    #define wxPG_NAT_BUTTON_BORDER_ANY  0
+    #define wxPG_NAT_BUTTON_BORDER_X    0
+    #define wxPG_NAT_BUTTON_BORDER_Y    0
+    #define wxPG_REFRESH_CONTROLS       0
+
 #else // defaults
 
     // space between vertical line and value text

@@ -46,6 +46,10 @@
 #endif
 
 #include "wx/propgrid/propgrid.h"
+
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
 #include "wx/propgrid/editors.h"
 #include "wx/propgrid/private.h"
 
@@ -2043,6 +2047,11 @@ int wxPropertyGrid::DoDrawItems( wxDC& dc,
                                  const wxRect* itemsRect ) const
 #endif
 {
+#ifdef __EMSCRIPTEN__
+    // Clear existing property grid elements before redrawing
+    WasmUnregisterRenderedElementsByParent(const_cast<wxPropertyGrid*>(this));
+#endif
+
     const wxPGProperty* firstItem = DoGetItemAtY(itemsRect->y);
     if ( !firstItem ) // Signal a need to clear entire paint area if grid is empty
         return -1;
@@ -2480,6 +2489,26 @@ int wxPropertyGrid::DoDrawItems( wxDC& dc,
 
         if ( fontChanged )
             dc.SetFont(normalFont);
+
+#ifdef __EMSCRIPTEN__
+        // Register property row for element tracking
+        const char* subType;
+        if (p->IsCategory())
+            subType = "category";
+        else if (isSelected)
+            subType = "selected";
+        else if (!p->IsEnabled())
+            subType = "disabled";
+        else
+            subType = "property";
+
+        wxWasmTrackElement(const_cast<wxPropertyGrid*>(this), "proprow",
+                           subType,
+                           static_cast<int>(arrInd - 1),  // unique id
+                           p->GetLabel(), p->GetDisplayedString(),
+                           wxRect(greyDepth, y, cellX - greyDepth, lh),
+                           p->IsEnabled());
+#endif
 
         y += lh;
     }

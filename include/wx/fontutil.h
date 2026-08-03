@@ -157,6 +157,12 @@ public :
     bool          strikethrough;
     wxString      faceName;
     wxFontEncoding encoding;
+
+#if defined(__WXWASM__)
+    mutable bool m_isRendered;
+    mutable wxString m_renderedString;
+#endif
+
 #endif // platforms
 
 #ifndef __WXQT__

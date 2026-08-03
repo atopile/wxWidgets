@@ -71,6 +71,9 @@ public:
         #define wxCURSOR_DEFAULT_TYPE   wxBITMAP_TYPE_CUR
     #endif
     #include "wx/qt/cursor.h"
+#elif defined(__WXWASM__)
+    #define wxCURSOR_DEFAULT_TYPE   wxBITMAP_TYPE_CUR
+    #include "wx/wasm/cursor.h"
 #endif
 
 // ----------------------------------------------------------------------------

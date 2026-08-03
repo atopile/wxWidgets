@@ -10,6 +10,10 @@
 #ifndef _WX_DIALOG_H_BASE_
 #define _WX_DIALOG_H_BASE_
 
+#ifdef __WXWASM__
+    #include <functional>
+#endif
+
 #include "wx/toplevel.h"
 #include "wx/containr.h"
 #include "wx/sharedptr.h"
@@ -71,6 +75,9 @@ public:
 
     // define public wxDialog methods to be implemented by the derived classes
     virtual int ShowModal() = 0;
+#ifdef __WXWASM__
+    virtual void ShowModal(std::function<void (int)> callback) = 0;
+#endif
     virtual void EndModal(int retCode) = 0;
     virtual bool IsModal() const = 0;
     // show the dialog frame-modally (needs a parent), using app-modal
@@ -374,6 +381,8 @@ public:
         #include "wx/osx/dialog.h"
     #elif defined(__WXQT__)
         #include "wx/qt/dialog.h"
+#elif defined(__WXWASM__)
+        #include "wx/wasm/dialog.h"
     #endif
 #endif
 

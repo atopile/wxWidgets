@@ -63,7 +63,7 @@
 // notice that this optimization is well worth using even in debug builds as it
 // changes asymptotic complexity of algorithms using indices to iterate over
 // wxString back to expected linear from quadratic
-#if wxUSE_UNICODE_UTF8
+#if wxUSE_UNICODE_UTF8 && !defined(__EMSCRIPTEN__)
     #define wxUSE_STRING_POS_CACHE 1
 #else // wxUSE_UNICODE_WCHAR
     #define wxUSE_STRING_POS_CACHE 0
@@ -344,6 +344,9 @@ public:
         { DoSet(str, nullptr, iter); }
     ~wxStringIteratorNode()
         { clear(); }
+
+    // Head of this thread's list of live iterator nodes.
+    static wxStringIteratorNode *&GetFirst();
 
     inline void clear();
     inline void set(const wxString *str, wxStringImpl::const_iterator *citer)
@@ -1304,11 +1307,16 @@ public:
       InvalidateCache();
 #endif // wxUSE_STRING_POS_CACHE
 
-      // We also need to clear any still existing iterators pointing into this
-      // string, as otherwise clearing them later, when they're destroyed,
-      // would try to use a dangling string pointer stored in them.
-      while ( m_iterators.ptr )
-          m_iterators.ptr->clear();
+      // Clear this thread's iterators pointing into the string before their
+      // stored string pointer becomes dangling.
+      wxStringIteratorNode* node = wxStringIteratorNode::GetFirst();
+      while ( node )
+      {
+          wxStringIteratorNode* const next = node->m_next;
+          if ( node->m_str == this )
+              node->clear();
+          node = next;
+      }
   }
 #endif // wxUSE_UNICODE_UTF8
 
@@ -3854,23 +3862,8 @@ private:
 
   ConvertedBuffer<wchar_t> m_convertedToWChar;
 
-  // FIXME-UTF8: (try to) move this elsewhere (TLS) or solve differently
-  //             assigning to character pointer to by wxString::iterator may
-  //             change the underlying wxStringImpl iterator, so we have to
-  //             keep track of all iterators and update them as necessary:
-  struct wxStringIteratorNodeHead
-  {
-      wxStringIteratorNodeHead() : ptr(nullptr) {}
-      wxStringIteratorNode *ptr;
-
-      // copying is disallowed as it would result in more than one pointer into
-      // the same linked list
-      wxDECLARE_NO_COPY_CLASS(wxStringIteratorNodeHead);
-  };
-
-  wxStringIteratorNodeHead m_iterators;
-
-  friend class WXDLLIMPEXP_FWD_BASE wxStringIteratorNode;
+  // Live iterators are tracked in per-thread lists, avoiding writes to a
+  // shared string from its const iterator methods.
   friend class WXDLLIMPEXP_FWD_BASE wxUniCharRef;
   friend class wxUTF8StringBuffer;
   friend class wxUTF8StringBufferLength;
@@ -4392,8 +4385,9 @@ void wxStringIteratorNode::DoSet(const wxString *str,
         wxGCC_ONLY_WARNING_SUPPRESS(dangling-pointer)
 #endif
 
-        m_next = str->m_iterators.ptr;
-        const_cast<wxString*>(m_str)->m_iterators.ptr = this;
+        wxStringIteratorNode *&first = GetFirst();
+        m_next = first;
+        first = this;
         if ( m_next )
             m_next->m_prev = this;
 
@@ -4414,7 +4408,7 @@ void wxStringIteratorNode::clear()
     if ( m_prev )
         m_prev->m_next = m_next;
     else if ( m_str ) // first in the list
-        const_cast<wxString*>(m_str)->m_iterators.ptr = m_next;
+        GetFirst() = m_next;
 
     m_next = m_prev = nullptr;
     m_citer = nullptr;

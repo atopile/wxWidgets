@@ -22,6 +22,9 @@ public:
                            const wxPoint& pos = wxDefaultPosition);
 
     virtual int ShowModal() override;
+#ifdef __WXWASM__
+    virtual void ShowModal(std::function<void (int)> callback) override;
+#endif
 
 protected:
     // Creates a message dialog taking any options that have been set after

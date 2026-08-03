@@ -481,6 +481,10 @@ case $1 in
 				basic_machine=le32-unknown
 				basic_os=nacl
 				;;
+			emscripten)
+				basic_machine=wasm32-unknown
+				basic_os=emscripten
+				;;
 			ncr3000)
 				basic_machine=i486-ncr
 				basic_os=sysv4

@@ -458,3 +458,6 @@
 
 /build/cmake/output/
 CMakeUserPresets.json
+
+# Playwright artifacts from WASM test runs.
+/test-results/

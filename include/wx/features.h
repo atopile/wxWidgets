@@ -28,7 +28,7 @@
 /*  taskbar is implemented in the major ports */
 #if defined(__WXMSW__) \
     || defined(__WXGTK__) || defined(__WXX11__) \
-    || defined(__WXOSX_MAC__) || defined(__WXQT__)
+    || defined(__WXOSX_MAC__) || defined(__WXQT__) || defined(__WXWASM__)
     #define wxHAS_TASK_BAR_ICON
 #else
     #undef wxUSE_TASKBARICON
@@ -73,7 +73,7 @@
 
 /* Direct access to bitmap data is not implemented in all ports yet */
 #if defined(__WXGTK__) || defined(__WXMAC__) || defined(__WXDFB__) || \
-        defined(__WXMSW__) || defined(__WXQT__)
+        defined(__WXMSW__) || defined(__WXQT__) || defined(__WXWASM__)
 
     /*
        HP aCC for PA-RISC can't deal with templates in wx/rawbmp.h.
@@ -120,4 +120,3 @@
 #endif
 
 #endif /*  _WX_FEATURES_H_ */
-

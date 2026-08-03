@@ -161,6 +161,11 @@ wxCONSTRUCTOR_5( wxComboBox, wxWindow*, Parent, wxWindowID, Id, \
 #include "wx/nonownedwnd.h"
 #define wxComboCtrlGenericTLW   wxNonOwnedWindow
 
+#elif defined(__WXWASM__)
+
+#include "wx/dialog.h"
+#define wxComboCtrlGenericTLW   wxDialog
+
 #else
 
 #include "wx/dialog.h"

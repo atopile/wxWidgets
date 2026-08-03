@@ -23,6 +23,10 @@
 
 #include "wx/headerctrl.h"
 
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
+
 #ifdef wxHAS_GENERIC_HEADERCTRL
 
 #include "wx/dcbuffer.h"
@@ -526,6 +530,10 @@ void wxHeaderCtrl::OnPaint(wxPaintEvent& WXUNUSED(event))
     wxAutoBufferedPaintDC dc(this);
     dc.Clear();
 
+#ifdef __EMSCRIPTEN__
+    WasmUnregisterRenderedElementsByParent(this);
+#endif
+
     int xpos = m_scrollOffset;
     for ( unsigned int i = 0; i < m_numColumns; i++ )
     {
@@ -589,6 +597,14 @@ void wxHeaderCtrl::OnPaint(wxPaintEvent& WXUNUSED(event))
                                     sortArrow,
                                     &params
                                 );
+
+#ifdef __EMSCRIPTEN__
+        wxWasmTrackElement(this, "columnheader",
+                           col.IsSortKey() ? "sortable" : "normal",
+                           static_cast<int>(idx), col.GetTitle(),
+                           wxEmptyString, wxRect(xpos, 0, colWidth, h),
+                           IsEnabled());
+#endif
 
         xpos += colWidth;
         if ( xpos > w )

@@ -15,8 +15,8 @@
 #include "wx/dcclient.h"
 #include "wx/window.h"
 
-// Only wxMSW doesn't use double buffering.
-#ifdef __WXMSW__
+// wxMSW and wxWASM don't use native double buffering.
+#if defined(__WXMSW__) || defined(__WXWASM__)
     #define wxALWAYS_NATIVE_DOUBLE_BUFFER       0
 #else
     #define wxALWAYS_NATIVE_DOUBLE_BUFFER       1

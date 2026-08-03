@@ -3070,6 +3070,18 @@ bool wxWindowBase::PopupMenu(wxMenu *menu, int x, int y)
     return rc;
 }
 
+#ifdef __WXWASM__
+void wxWindowBase::PopupMenu(wxMenu *menu, int x, int y,
+                             std::function<void (bool)> callback)
+{
+    wxCHECK_RET( menu, "can't popup null menu" );
+
+    menu->SetInvokingWindow(AsWindow());
+    wxCurrentPopupMenu = menu;
+    DoPopupMenu(menu, x, y, callback);
+}
+#endif
+
 // this is used to pass the id of the selected item from the menu event handler
 // to the main function itself
 //
@@ -4156,5 +4168,4 @@ wxWindowBase::AdjustForLayoutDirection(wxCoord x,
 
     return x;
 }
-
 

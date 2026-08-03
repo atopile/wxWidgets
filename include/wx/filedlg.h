@@ -271,7 +271,7 @@ wxSaveFileSelector(const wxString& what,
                    wxWindow *parent = nullptr);
 
 
-#if defined (__WXUNIVERSAL__)
+#if defined (__WXUNIVERSAL__) || defined(__WXWASM__)
     #define wxHAS_GENERIC_FILEDIALOG
     #include "wx/generic/filedlgg.h"
 #elif defined(__WXMSW__) || (defined(__WXQT__) && defined(__WINDOWS__))

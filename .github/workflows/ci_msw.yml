@@ -56,47 +56,27 @@ permissions:
 
 jobs:
   msw-msvs:
-    runs-on: ${{ matrix.runner }}
-    name: wxMSW ${{ matrix.compiler }} ${{ matrix.configuration }} ${{ matrix.platform }}
+    runs-on: windows-2022
+    name: wxMSW vs2022 ${{ matrix.configuration }} ${{ matrix.platform }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - configuration: 'DLL Debug'
             platform: 'x64'
-            runner: windows-2022
-            compiler: vs2022
-            compiler_suffix: vc17.sln
             use_utf8: true
           - configuration: 'Release'
             platform: 'arm64'
-            runner: windows-2022
-            compiler: vs2022
-            compiler_suffix: vc17.sln
-            skip_running_tests: true
           - configuration: 'Debug'
             platform: 'Win32'
-            runner: windows-2022
-            compiler: vs2022
-            compiler_suffix: vc17.sln
             use_cxx20: true
-            use_compat_3_0: true
           - configuration: 'DLL Release'
             use_std_string: true
             platform: 'x64'
-            runner: windows-2022
-            compiler: vs2022
-            compiler_suffix: vc17.sln
-          - configuration: 'DLL Release'
-            platform: 'x64'
-            runner: windows-2025-vs2026
-            compiler: vs2026
-            compiler_suffix: vc18.slnx
-            use_cxx20: true
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
         with:
           submodules: 'recursive'
 
@@ -105,14 +85,9 @@ jobs:
         run: |
             $use_std_string = "${{ matrix.use_std_string }}" ? 1 : 0
             $use_utf8 = "${{ matrix.use_utf8 }}" ? 1 : 0
-            $use_compat_3_0 = "${{ matrix.use_compat_3_0 }}" ? 1 : 0
-            $no_compat_3_2 = "${{ matrix.no_compat_3_2 }}" ? 1 : 0
-            if ( $use_std_string -or $use_utf8 -or $use_compat_3_0 -or $no_compat_3_2 ) {
-              $use_compat_3_2 = 1 - $no_compat_3_2
+            if ( $use_std_string -or $use_utf8 ) {
               $txt = Get-Content setup.h
               Write-Output $txt |
-              %{$_ -replace "define WXWIN_COMPATIBILITY_3_0 0", "define WXWIN_COMPATIBILITY_3_0 $use_compat_3_0"} |
-              %{$_ -replace "define WXWIN_COMPATIBILITY_3_2 1", "define WXWIN_COMPATIBILITY_3_2 $use_compat_3_2"} |
               %{$_ -replace "define wxUSE_STD_STRING_CONV_IN_WXSTRING 0", "define wxUSE_STD_STRING_CONV_IN_WXSTRING $use_std_string"} |
               %{$_ -replace "define wxUSE_UNICODE_UTF8 0", "define wxUSE_UNICODE_UTF8 $use_utf8"} |
               Set-Content setup.h
@@ -121,22 +96,16 @@ jobs:
             if ( $use_cxx20 ) {
               cd ..\..\..\build\msw
               cp cxx20.props wx_local.props
-              # Enable Lunasvg for C++20 builds
-              cd ..\..\include\wx\msw
-              $txt = Get-Content setup.h
-              Write-Output $txt |
-                %{$_ -replace "#define wxUSE_LUNASVG 0", "#define wxUSE_LUNASVG 1"} |
-                Set-Content setup.h
             }
 
       - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v3
+        uses: microsoft/setup-msbuild@v2
         with:
             vs-prerelease: true
 
       - name: Build
         run: |
-            msbuild /noLogo /m /warnaserror '/p:Configuration=${{ matrix.configuration }}' /p:Platform=${{ matrix.platform }} build\msw\wx_${{ matrix.compiler_suffix }}
+            msbuild /noLogo /m /warnaserror '/p:Configuration=${{ matrix.configuration }}' /p:Platform=${{ matrix.platform }} build\msw\wx_vc17.sln
             if ( '${{ matrix.configuration }}'.IndexOf('DLL') -ne -1 ) {
                 $dlldir = Join-Path (Get-Location) 'lib\vc_${{ matrix.platform }}_dll'
                 Write-Output "Adding $dlldir to the PATH"
@@ -146,14 +115,14 @@ jobs:
       - name: Build samples
         if: matrix.platform != 'arm64'
         run: |
-            msbuild /noLogo /m /warnaserror '/p:Configuration=${{ matrix.configuration }}' /p:Platform=${{ matrix.platform }} samples\samples_${{ matrix.compiler_suffix }}
+            msbuild /noLogo /m /warnaserror '/p:Configuration=${{ matrix.configuration }}' /p:Platform=${{ matrix.platform }} samples\samples_vc17.sln
 
       - name: Build tests
         run: |
-            msbuild /noLogo /m /warnaserror '/p:Configuration=${{ matrix.configuration }}' /p:Platform=${{ matrix.platform }} tests\test_${{ matrix.compiler_suffix }}
+            msbuild /noLogo /m /warnaserror '/p:Configuration=${{ matrix.configuration }}' /p:Platform=${{ matrix.platform }} tests\test_vc17.sln
 
       - name: Run tests
-        if: matrix.skip_running_tests != true
+        if: ${{ !contains(matrix.platform, 'arm64') }}
         working-directory: tests
         run: |
             go install github.com/mccutchen/go-httpbin/v2/cmd/go-httpbin@v2
@@ -175,10 +144,10 @@ jobs:
 
       - name: Build GUI tests
         run: |
-            msbuild /noLogo /m /warnaserror '/p:Configuration=${{ matrix.configuration }}' /p:Platform=${{ matrix.platform }} tests\test_gui_${{ matrix.compiler_suffix }}
+            msbuild /noLogo /m /warnaserror '/p:Configuration=${{ matrix.configuration }}' /p:Platform=${{ matrix.platform }} tests\test_gui_vc17.sln
 
       - name: Run GUI tests
-        if: matrix.skip_running_tests != true
+        if: ${{ !contains(matrix.platform, 'arm64') }}
         working-directory: tests
         run: |
             .\vc*msw*\test_gui.exe

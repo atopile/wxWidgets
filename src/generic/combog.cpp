@@ -22,6 +22,10 @@
 
 #include "wx/combo.h"
 
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
+
 #ifndef WX_PRECOMP
     #include "wx/log.h"
     #include "wx/combobox.h"
@@ -326,6 +330,21 @@ void wxGenericComboCtrl::OnPaintEvent( wxPaintEvent& WXUNUSED(event) )
         else
             wxComboPopup::DefaultPaintComboControl(this, dc, tcRect);
     }
+
+#ifdef __EMSCRIPTEN__
+    // Register combo/choice button for element tracking
+    WasmUnregisterRenderedElementsByParent(this);
+
+    // The dropdown button area
+    wxWasmTrackElement(this, "combobutton",
+                       IsPopupShown() ? "open" : "closed", 0,
+                       GetValue(), GetName(), m_btnArea, IsEnabled());
+
+    // The text/selection area for clicking
+    wxWasmTrackElement(this, "combotextarea",
+                       HasFlag(wxCB_READONLY) ? "readonly" : "editable", 1,
+                       GetValue(), GetName(), m_tcArea, IsEnabled());
+#endif
 
     delete dcPtr;
 }

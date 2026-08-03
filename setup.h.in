@@ -504,6 +504,10 @@
 
 #define wxUSE_GLCANVAS       0
 
+#define wxUSE_GLCANVAS_EGL   0
+
+#define wxUSE_OPENGL_EMULATION 0
+
 #define wxUSE_RICHTEXT       0
 
 
@@ -1145,4 +1149,3 @@
 #undef wxHAS_WORKING_GTK_DC_BLIT
 
 #endif /* __WX_SETUP_H__ */
-

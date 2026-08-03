@@ -28,6 +28,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <functional>
 
 #define __WX_COMPILING_MSGDLGG_CPP__ 1
 #include "wx/msgdlg.h"
@@ -291,5 +292,18 @@ int wxGenericMessageDialog::ShowModal()
 
     return wxMessageDialogBase::ShowModal();
 }
+
+#ifdef __WXWASM__
+void wxGenericMessageDialog::ShowModal(std::function<void (int)> callback)
+{
+    if ( !m_created )
+    {
+        m_created = true;
+        DoCreateMsgdialog();
+    }
+
+    return wxMessageDialogBase::ShowModal(callback);
+}
+#endif
 
 #endif // wxUSE_MSGDLG

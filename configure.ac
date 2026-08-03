@@ -73,6 +73,7 @@ dnl ------------------------------------------------------------------------
 dnl OS (assume Unix)
 USE_UNIX=1
 USE_WIN32=0
+USE_WASM=0
 USE_DOS=0
 USE_BEOS=0
 USE_MAC=0
@@ -110,7 +111,7 @@ NEEDS_D_REENTRANT_FOR_R_FUNCS=0
 dnl the list of all available toolkits
 dnl
 dnl update NUM_TOOLKITS calculation below when adding a new toolkit here!
-ALL_TOOLKITS="GTK OSX_COCOA OSX_IPHONE MSW X11 DFB QT"
+ALL_TOOLKITS="GTK OSX_COCOA OSX_IPHONE MSW X11 DFB QT WASM"
 
 dnl NB: these wxUSE_XXX constants have value of 0 or 1 unlike all the other ones
 dnl     which are either yes or no
@@ -121,6 +122,7 @@ DEFAULT_wxUSE_MSW=0
 DEFAULT_wxUSE_X11=0
 DEFAULT_wxUSE_DFB=0
 DEFAULT_wxUSE_QT=0
+DEFAULT_wxUSE_WASM=0
 
 dnl these are the values which are really default for the given platform:
 dnl they're used if no --with-<toolkit> options were given to detect the
@@ -132,6 +134,7 @@ DEFAULT_DEFAULT_wxUSE_MSW=0
 DEFAULT_DEFAULT_wxUSE_X11=0
 DEFAULT_DEFAULT_wxUSE_DFB=0
 DEFAULT_DEFAULT_wxUSE_QT=0
+DEFAULT_DEFAULT_wxUSE_WASM=0
 
 PROGRAM_EXT=
 SAMPLES_CXXFLAGS=
@@ -279,6 +282,13 @@ case "${host}" in
     AC_DEFINE(__BSD__)
     AC_DEFINE(__DARWIN__)
     DEFAULT_DEFAULT_wxUSE_OSX_COCOA=1
+  ;;
+
+  *-*-emscripten* )
+    USE_WASM=1
+    AC_DEFINE(__WASM__)
+    DEFAULT_DEFAULT_wxUSE_WASM=1
+    PROGRAM_EXT=".js"
   ;;
 
   *-*-beos* )
@@ -431,6 +441,7 @@ WX_ARG_ONLY_WITH(msw,           [  --with-msw              use MS-Windows], [wxU
 WX_ARG_ONLY_WITH(directfb,      [  --with-directfb         use DirectFB], [wxUSE_DFB="$withval" wxUSE_UNIVERSAL="yes" CACHE_DFB=1 TOOLKIT_GIVEN=1])
 WX_ARG_ONLY_WITH(x11,           [  --with-x11              use X11], [wxUSE_X11="$withval" wxUSE_UNIVERSAL="yes" CACHE_X11=1 TOOLKIT_GIVEN=1])
 WX_ARG_ONLY_WITH(qt,            [  --with-qt               use Qt], [wxUSE_QT="$withval" CACHE_QT=1 TOOLKIT_GIVEN=1])
+WX_ARG_ONLY_WITH(wasm,          [  --with-wasm             use WebAssembly], [wxUSE_WASM="$withval" CACHE_WASM=1 TOOLKIT_GIVEN=1])
 WX_ARG_ENABLE(nanox,       [  --enable-nanox          use NanoX], wxUSE_NANOX)
 
 dnl check that no more than one toolkit is given and that if none are given that
@@ -484,7 +495,7 @@ if test "$wxUSE_GUI" = "yes"; then
     NUM_TOOLKITS=`expr ${wxUSE_GTK:-0} \
                   + ${wxUSE_OSX_COCOA:-0} + ${wxUSE_OSX_IPHONE:-0} + ${wxUSE_DFB:-0} \
                   + ${wxUSE_MSW:-0} \
-                  + ${wxUSE_X11:-0} + ${wxUSE_QT:-0}`
+                  + ${wxUSE_X11:-0} + ${wxUSE_QT:-0} + ${wxUSE_WASM:-0}`
 
 
     case "$NUM_TOOLKITS" in
@@ -3281,6 +3292,12 @@ installed, where VER is 2, 3 or 4.
         TOOLCHAIN_DEFS="${TOOLCHAIN_DEFS} -D__WXMAC__ -D__WXOSX__"
     fi
 
+    if test "$wxUSE_WASM" = 1; then
+        TOOLKIT=WASM
+        dnl Use built-in png/zlib via Emscripten ports.
+        GUI_TK_LIBRARY="-sUSE_LIBPNG=1 -sUSE_ZLIB=1"
+    fi
+
     if test "$wxUSE_OSX_IPHONE" = 1; then
         TOOLKIT=OSX_IPHONE
     fi
@@ -3462,6 +3479,11 @@ if test "$wxUSE_OPENGL" = "yes" -o "$wxUSE_OPENGL" = "auto"; then
         OPENGL_LIBS="-framework OpenGL"
     elif test "$wxUSE_MSW" = 1; then
         OPENGL_LIBS="-lopengl32"
+    elif test "$USE_WASM" = 1; then
+        dnl WASM uses WebGL through Emscripten, without external libraries.
+        AC_MSG_NOTICE([Using WebGL for OpenGL support on WASM])
+        OPENGL_LIBS=""
+        AC_DEFINE(wxUSE_OPENGL_EMULATION)
     elif test "$wxUSE_X11" = 1 -o "$wxUSE_GTK" = 1 -o "$wxUSE_QT" = 1; then
 
         dnl adjust CPPFLAGS to include GL/gl.h location if necessary

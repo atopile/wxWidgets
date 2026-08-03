@@ -28,6 +28,10 @@
 
 #include "wx/renderer.h"
 #include "wx/aui/auibook.h"
+
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
 #include "wx/aui/framemanager.h"
 #include "wx/aui/dockart.h"
 
@@ -954,9 +958,14 @@ wxAuiTabArt* wxAuiGenericTabArt::Clone()
 }
 
 void wxAuiGenericTabArt::DrawBackground(wxDC& dc,
-                                        wxWindow* WXUNUSED(wnd),
+                                        wxWindow* wnd,
                                         const wxRect& rect)
 {
+#ifdef __EMSCRIPTEN__
+    // Unregister previous tab elements before redrawing
+    if (wnd)
+        WasmUnregisterRenderedElementsByParent(wnd);
+#endif
     // draw background using arbitrary hard-coded, but at least adapted to dark
     // mode, gradient
     int topLightness, bottomLightness;
@@ -1041,6 +1050,22 @@ int wxAuiGenericTabArt::DrawPageTab(
     wxCoord tab_x = in_rect.x;
     wxCoord tab_y = in_rect.y + in_rect.height - tab_height;
 
+#ifdef __EMSCRIPTEN__
+    // Register AUI tab for element tracking
+    if (wnd)
+    {
+        // Generate unique index from tab label (simple hash)
+        int tabIndex = 0;
+        for (size_t i = 0; i < page.caption.length(); i++)
+            tabIndex = tabIndex * 31 + static_cast<int>(page.caption[i]);
+        if (tabIndex < 0) tabIndex = -tabIndex;
+
+        wxWasmTrackElement(wnd, "tab",
+                           page.active ? "selected" : "button",
+                           tabIndex, page.caption, page.caption,
+                           wxRect(tab_x, tab_y, tab_width, tab_height));
+    }
+#endif
 
     caption = page.caption;
 
@@ -1468,9 +1493,14 @@ void wxAuiSimpleTabArt::SetActiveColour(const wxColour& colour)
 }
 
 void wxAuiSimpleTabArt::DrawBackground(wxDC& dc,
-                                       wxWindow* WXUNUSED(wnd),
+                                       wxWindow* wnd,
                                        const wxRect& rect)
 {
+#ifdef __EMSCRIPTEN__
+    // Unregister previous tab elements before redrawing
+    if (wnd)
+        WasmUnregisterRenderedElementsByParent(wnd);
+#endif
     // draw background
     dc.SetBrush(m_bkBrush);
     dc.SetPen(*wxTRANSPARENT_PEN);
@@ -1528,6 +1558,23 @@ void wxAuiSimpleTabArt::DrawTab(wxDC& dc,
     wxCoord tab_width = tab_size.x;
     wxCoord tab_x = in_rect.x;
     wxCoord tab_y = in_rect.y + in_rect.height - tab_height;
+
+#ifdef __EMSCRIPTEN__
+    // Register AUI tab for element tracking
+    if (wnd)
+    {
+        // Generate unique index from tab label (simple hash)
+        int tabIndex = 0;
+        for (size_t i = 0; i < page.caption.length(); i++)
+            tabIndex = tabIndex * 31 + static_cast<int>(page.caption[i]);
+        if (tabIndex < 0) tabIndex = -tabIndex;
+
+        wxWasmTrackElement(wnd, "tab",
+                           page.active ? "selected" : "button",
+                           tabIndex, page.caption, page.caption,
+                           wxRect(tab_x, tab_y, tab_width, tab_height));
+    }
+#endif
 
     caption = page.caption;
 

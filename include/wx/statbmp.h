@@ -71,6 +71,8 @@ protected:
     #include "wx/osx/statbmp.h"
 #elif defined(__WXQT__)
     #include "wx/qt/statbmp.h"
+#elif defined(__WXWASM__)
+    #include "wx/wasm/statbmp.h"
 #endif
 
 #endif // wxUSE_STATBMP

@@ -21,6 +21,10 @@
 
 #include "wx/listctrl.h"
 
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
+
 #ifndef WX_PRECOMP
     #include "wx/scrolwin.h"
     #include "wx/timer.h"
@@ -2030,6 +2034,11 @@ void wxListMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
     // done (a Windows requirement).
     wxPaintDC dc( this );
 
+#ifdef __EMSCRIPTEN__
+    // Clear existing list elements before redrawing
+    WasmUnregisterRenderedElementsByParent(GetListCtrl());
+#endif
+
     if ( IsEmpty() )
     {
         // nothing to draw or not the moment to draw it
@@ -2120,6 +2129,11 @@ void wxListMainWindow::OnPaint( wxPaintEvent &WXUNUSED(event) )
                                              IsHighlighted(line),
                                              line == m_current,
                                              IsItemChecked(line) );
+
+#ifdef __EMSCRIPTEN__
+            // Register list item row for element tracking
+            wxWasmTrackListRow(GetListCtrl(), line, rectLine, origin.x, origin.y);
+#endif
         }
 
         if ( HasFlag(wxLC_HRULES) )
@@ -5721,7 +5735,7 @@ wxGenericListCtrl::GetClassDefaultAttributes(wxWindowVariant variant)
     wxUnusedVar(variant);
     wxVisualAttributes attr;
     attr.colFg = wxSystemSettings::GetColour(wxSYS_COLOUR_LISTBOXTEXT);
-    attr.colBg = wxSystemSettings::GetColour(wxSYS_COLOUR_LISTBOX);
+    attr.colBg = *wxWHITE; //wxSystemSettings::GetColour(wxSYS_COLOUR_LISTBOX);
     attr.font  = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
     return attr;
 #endif

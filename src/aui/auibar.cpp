@@ -25,6 +25,10 @@
 #include "wx/dcbuffer.h"
 #include "wx/frame.h"
 #include "wx/sizer.h"
+
+#ifdef __EMSCRIPTEN__
+    #include "wx/wasm/elementtracker.h"
+#endif
 #include "wx/image.h"
 #include "wx/settings.h"
 #include "wx/menu.h"
@@ -2634,6 +2638,45 @@ void wxAuiToolBar::OnPaint(wxPaintEvent& WXUNUSED(evt))
         wxRect dropDownRect = GetOverflowRect();
         m_art->DrawOverflowButton(dc, this, dropDownRect, m_overflowState);
     }
+
+#ifdef __EMSCRIPTEN__
+    // Update element registry with toolbar tools (for E2E test automation).
+    // Runs after every paint so position/enabled state stays current. The item
+    // label encodes selection state (appended " [checked]") so tests can detect
+    // a toggled tool without changing the registry signature.
+    WasmUnregisterRenderedElementsByParent(this);
+
+    for (size_t j = 0, itemCount = m_items.GetCount(); j < itemCount; ++j)
+    {
+        wxAuiToolBarItem& item = m_items.Item(j);
+
+        if (!item.m_sizerItem)
+            continue;
+        if (item.m_kind == wxITEM_SEPARATOR)
+            continue;
+
+        wxRect itemRect = item.m_sizerItem->GetRect();
+
+        // Skip items scrolled off the end (match the paint loop cutoff)
+        if ((horizontal  && itemRect.x + itemRect.width  >= last_extent) ||
+            (!horizontal && itemRect.y + itemRect.height >= last_extent))
+            continue;
+
+        const char* subType = (item.m_kind == wxITEM_CONTROL) ? "control" : "button";
+        bool isEnabled = !(item.m_state & wxAUI_BUTTON_STATE_DISABLED);
+        bool isChecked = (item.m_state & wxAUI_BUTTON_STATE_CHECKED) != 0;
+
+        // Encode checked state in the label so the existing registry signature
+        // carries the signal without a schema change.
+        wxString registryLabel = item.m_label;
+        if (isChecked)
+            registryLabel += wxT(" [checked]");
+
+        wxWasmTrackElement(this, "tool", subType, static_cast<int>(j),
+                           registryLabel, item.m_shortHelp, itemRect,
+                           isEnabled);
+    }
+#endif
 }
 
 void wxAuiToolBar::OnLeftDown(wxMouseEvent& evt)

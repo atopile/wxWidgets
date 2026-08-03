@@ -58,6 +58,8 @@ wxConfigBase *wxAppTraitsBase::CreateConfig()
 {
 #if defined(wxHAS_CONFIG_AS_REGCONFIG)
     return new wxRegConfig(wxTheApp->GetAppName(), wxTheApp->GetVendorName());
+#elif defined(wxHAS_CONFIG_AS_LOCALSTORAGECONFIG)
+    return new wxLocalStorageConfig(wxTheApp->GetAppName());
 #elif defined(wxHAS_CONFIG_AS_FILECONFIG)
     return new wxFileConfig(wxTheApp->GetAppName());
 #else
