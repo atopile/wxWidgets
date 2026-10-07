@@ -579,8 +579,10 @@ wxImage wxBitmap::ConvertToImage() const
 {
     wxCHECK_MSG(IsOk(), wxNullImage, wxT("invalid bitmap"));
 
-    const int width = GetWidth();
-    const int height = GetHeight();
+    // Pixel data is stored at physical (scaled) size; iterate that, not the
+    // logical size, or scale-factor > 1 bitmaps come out as a top-left crop.
+    const int width = M_BITMAPDATA->m_dataWidth;
+    const int height = M_BITMAPDATA->m_dataHeight;
     const int depth = GetDepth();
     const bool hasAlpha = HasAlpha();
 
@@ -592,6 +594,11 @@ wxImage wxBitmap::ConvertToImage() const
         return wxNullImage;
     }
 
+    const wxMask *mask = GetMask();
+    const uint32_t *maskPtr =
+        (mask != NULL && mask->GetDataSize() == width * height)
+            ? mask->GetData() : NULL;
+
     unsigned char *data = static_cast<unsigned char *>(BeginRawAccess());
     if (data == NULL)
     {
@@ -602,7 +609,7 @@ wxImage wxBitmap::ConvertToImage() const
 
     wxImage image(width, height, false);
 
-    if (hasAlpha && !image.HasAlpha())
+    if ((hasAlpha || maskPtr != NULL) && !image.HasAlpha())
     {
         image.InitAlpha();
     }
@@ -620,9 +627,17 @@ wxImage wxBitmap::ConvertToImage() const
 
             image.SetRGB(x, y, r, g, b);
 
-            if (hasAlpha)
+            if (maskPtr != NULL && maskPtr[y * width + x] == 0)
+            {
+                image.SetAlpha(x, y, 0);
+            }
+            else if (hasAlpha)
             {
                 image.SetAlpha(x, y, a);
+            }
+            else if (maskPtr != NULL)
+            {
+                image.SetAlpha(x, y, 0xff);
             }
         }
         rowPtr += bytesPerRow;
@@ -901,7 +916,16 @@ wxGDIRefData* wxBitmap::CloneGDIRefData(const wxGDIRefData* data) const
         memcpy(newRef->m_bitmap, oldRef->m_bitmap, size);
     }
 
-    newRef->m_dataSource = BITMAP_DATA_SOURCE_CPP;
+    // A never-materialized source (SOURCE_NONE, no buffer) must stay
+    // SOURCE_NONE: stamping it SOURCE_CPP with a NULL buffer is an invalid
+    // state — SyncToCpp() then skips allocation and raw access/ConvertToImage
+    // fail (seen when wxBitmapBundle::GetBitmap sets a scale factor on a
+    // shared, still-blank bitmap).
+    if (oldRef->GetDataSource() != BITMAP_DATA_SOURCE_NONE ||
+            newRef->m_bitmap != NULL)
+    {
+        newRef->m_dataSource = BITMAP_DATA_SOURCE_CPP;
+    }
 
     if (oldRef->m_mask != NULL)
     {

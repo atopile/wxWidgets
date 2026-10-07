@@ -33,21 +33,11 @@
     #include "wx/dynlib.h"
 #endif
 
-namespace
-{
-
 // global object
 // VERY IMPORTANT: do not use the default constructor since it would
 //                 try to init the wxPlatformInfo instance using
 //                 gs_platInfo itself!
-wxPlatformInfo gs_platInfo(wxPORT_UNKNOWN);
-
-#if wxUSE_THREADS
-// Critical section protecting gs_platInfo initialization.
-wxCriticalSection gs_csInit;
-#endif // wxUSE_THREADS
-
-} // anonymous namespace
+static wxPlatformInfo gs_platInfo(wxPORT_UNKNOWN);
 
 // ----------------------------------------------------------------------------
 // constants
@@ -229,12 +219,12 @@ void wxPlatformInfo::InitForCurrentPlatform()
 /* static */
 const wxPlatformInfo& wxPlatformInfo::Get()
 {
-#if wxUSE_THREADS
-    wxCriticalSectionLocker lockInit(gs_csInit);
-#endif // wxUSE_THREADS
-
-    if ( !gs_platInfo.m_initializedForCurrentPlatform )
+    static bool initialized = false;
+    if ( !initialized )
+    {
         gs_platInfo.InitForCurrentPlatform();
+        initialized = true;
+    }
 
     return gs_platInfo;
 }

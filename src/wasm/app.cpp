@@ -12,19 +12,30 @@
 
 #include "wx/apptrait.h"
 #include "wx/dnd.h"
+#include "wx/frame.h"
 #include "wx/log.h"
+#include "wx/menu.h"
 #include "wx/nonownedwnd.h"
 #include "wx/toplevel.h"
 #include "wx/utils.h"
 #include "wx/window.h"
 
 #include "wx/private/eventloopsourcesmanager.h"
+#include "wx/wasm/private/dispatch.h"
+#include "wx/wasm/private/mailbox.h"
 #include "wx/wasm/private/display.h"
+
+// Defined in evtloop.cpp: run work on an activation that may suspend — plain
+// DOM entries queue the job for the promising job tick instead of trapping
+// with SuspendError at the first wait below them.
+extern "C" void wxWasmRunOnDispatchContext(void (*fn)(void *), void *arg);
 #include "wx/wasm/private/keyboard.h"
 #include "wx/wasm/private/mouse.h"
 #include "wx/wasm/private/timer.h"
 
 #include <emscripten.h>
+#include <deque>
+#include <string>
 #include <emscripten/html5.h>
 
 void RegisterEmscriptenCallbacks(wxApp* app);
@@ -39,7 +50,8 @@ extern wxLog* wxCreateLogWasm();
 IMPLEMENT_DYNAMIC_CLASS(wxApp, wxAppBase)
 
 wxApp::wxApp()
-    : m_display(new wxWasmDisplay())
+    : m_display(new wxWasmDisplay()),
+      m_parkedMotionQueued(false)
 {
     printf("Creating app\n");
     RegisterEmscriptenCallbacks(this);
@@ -49,6 +61,33 @@ wxApp::~wxApp()
 {
     delete m_display;
 }
+
+#if wxUSE_EXCEPTIONS
+bool wxApp::OnExceptionInMainLoop()
+{
+    // Browser-port contract: a throwing event handler must not tear down the
+    // app. The base default exits the main loop — in the browser that reads
+    // as a silent clean shutdown mid-session (observed: a throwing wxEVT_TEXT
+    // handler destroying every window). The pre-EH builds survived because
+    // the throw escaped to the JS dispatch boundary and was contained there;
+    // keep that behavior, but say what happened on the console.
+    try
+    {
+        throw;
+    }
+    catch ( const std::exception& e )
+    {
+        fprintf(stderr, "[wx-app] unhandled exception in event handler: %s\n",
+                e.what());
+    }
+    catch ( ... )
+    {
+        fprintf(stderr, "[wx-app] unhandled non-std exception in event handler\n");
+    }
+
+    return true; // keep the main loop running
+}
+#endif
 
 // Defined in toplevel.cpp. True if `win` is, or contains, a wxGLCanvas — the 3D viewer,
 // whose paint runs the multi-threaded CPU raytracer. Shared so Paint() can defer it on
@@ -73,7 +112,7 @@ void wxApp::Paint(bool deferGLCanvasWindows)
         // thread for them. When this Paint() is a SYNCHRONOUS repaint driven from a DOM
         // event callback (a mouse button, see HandleMouseEvent) the main thread can't
         // return to the JS event loop to boot an on-demand Worker → the raytrace join
-        // deadlocks (or aborts the nested Asyncify unwind). Defer it to the per-frame
+        // deadlocks. Defer it to the per-frame
         // ProcessEvents pump (evtloop.cpp), which yields between frames so Workers boot —
         // the same remedy wx_window_resize uses. The window keeps NeedsPaint() set, so the
         // next pump frame repaints it. The MAIN frame's wxGLCanvas is the GAL view (glemu/
@@ -194,6 +233,20 @@ bool wxApp::HandleKeyEvent(wxKeyEvent *event)
             SetKeyPressed(event->GetKeyCode(), false);
         }
 
+        if (wxWasmDispatchParked())
+        {
+            // Another dispatch chain is suspended mid-handler; running key
+            // handlers now would interleave with its half-mutated widget
+            // state. Queue the event for the first tick after resume.
+            // CHAR_HOOK reports "not handled" so the caller still synthesizes
+            // the follow-up KEY_DOWN (queued too, order preserved); other
+            // types report "handled" so the browser default stays suppressed
+            // and no duplicate CHAR is synthesized.
+            wxPostEvent(window->GetEventHandler(), *event);
+            return event->GetEventType() != wxEVT_CHAR_HOOK;
+        }
+
+        wxWasmDispatchGuard guard;
         return window->HandleWindowEvent(*event);
     }
     else
@@ -240,8 +293,70 @@ void wxApp::UpdateMouseState(const wxMouseEvent& event)
     m_mouseState.SetPosition(event.GetPosition());
 }
 
+void wxApp::ProcessPendingEvents()
+{
+    // Every drain re-opens the parked-motion coalescing window (see
+    // HandleMouseEvent), whether or not the queued motion is processed by
+    // this particular drain: under-posting is bounded to one drain,
+    // over-posting is a duplicate motion the receiver treats as a no-op.
+    m_parkedMotionQueued = false;
+    wxAppBase::ProcessPendingEvents();
+}
+
 void wxApp::HandleMouseEvent(wxMouseEvent *event)
 {
+    if (wxWasmDispatchParked())
+    {
+        // Another dispatch chain is suspended mid-handler; running mouse
+        // handlers now would interleave with its half-mutated widget
+        // state. Keep wxGetMouseState() truthful and queue the event for
+        // the parked chain's own wxYield() or the first tick after resume
+        // (targeted like SendMouseEventToWindow would). Hover synthesis
+        // (enter/leave, cursor shape) stays skipped - it walks the widget
+        // state the interlock protects; the next live motion re-syncs it.
+        //
+        // Button events are queued 1:1. Motion is coalesced to ONE queued
+        // event per drain: a chain that spins in
+        //   while (running) { wxYield(); wxMilliSleep(1); }
+        // (KiCad's TOOL_MANAGER::RunSynchronousAction - the paste-move, a
+        // commit-backed drag) is parked here for the whole interaction, and
+        // its wxYield() drains this queue. Dropping motion instead left
+        // KiCad's move tool without a single TA_MOUSE_MOTION, so a pasted
+        // item never followed the pointer although the (queued) click still
+        // placed it. KiCad's WX_VIEW_CONTROLS::onMotion reads the LIVE
+        // pointer (wxGetMousePosition, kept fresh by UpdateMouseState), so
+        // one motion per drain is enough to re-sync it; a burst of moves
+        // during a long park does not pile up.
+        UpdateMouseState(*event);
+
+        const bool isMotion = event->GetEventType() == wxEVT_MOTION;
+
+        if (event->ButtonDown() || event->ButtonUp() || event->ButtonDClick()
+            || (isMotion && !m_parkedMotionQueued))
+        {
+            wxWindow *target = GetMouseWindow(event->GetPosition());
+
+            if (target != NULL && target->IsEnabled())
+            {
+                wxMouseEvent queued(*event);
+                queued.SetPosition(target->ScreenToClient(event->GetPosition()));
+                queued.SetEventObject(target);
+                queued.SetId(target->GetId());
+                wxPostEvent(target->GetEventHandler(), queued);
+
+                if (isMotion)
+                    m_parkedMotionQueued = true;
+            }
+        }
+
+        return;
+    }
+
+    wxWasmDispatchGuard dispatchGuard;
+
+    // A live motion supersedes any motion still queued from a park.
+    m_parkedMotionQueued = false;
+
     if (wxDropSource::IsDragInProgress())
     {
         wxDropSource::HandleMouseEvent(event);
@@ -282,6 +397,15 @@ void wxApp::HandleMouseEvent(wxMouseEvent *event)
             }
         }
 
+        // A button press outside a shown transient popup (combo dropdown,
+        // toolbar palette) dismisses it before the press is delivered — the
+        // native ports' grab/activation semantics (wxWasmDismissTransientPopupsOutside).
+        // A press the converter reports as a double-click is still a press.
+        if (event->ButtonDown() || event->ButtonDClick())
+        {
+            wxWasmDismissTransientPopupsOutside(g_mouseWindow);
+        }
+
         if (g_mouseWindow != NULL)
         {
             wxEventType eventType = event->GetEventType();
@@ -303,15 +427,23 @@ void wxApp::HandleMouseEvent(wxMouseEvent *event)
                 // canvas holds focus. Grabbing focus to the toolbar on every tool click broke
                 // Esc and other canvas hotkeys until the user re-clicked the canvas. (Can't
                 // include the aui header from wx core, so detect toolbars by class name.)
+                // The same holds for the MENUBAR (findings P-4): native menubars never
+                // take keyboard focus, but this port's wxMenuBar is an ordinary window, so
+                // Place → Place Footprints left the menubar as the frame's last-focused
+                // child and every hotkey pressed on a chooser-held part was lost until
+                // the placement click.
                 bool toolbarClick = false;
 
                 for (wxWindow* w = g_mouseWindow; w != NULL; w = w->GetParent())
                 {
-                    if (w->GetClassInfo()->GetClassName() &&
-                        wxString(w->GetClassInfo()->GetClassName()).Lower().Contains("toolbar"))
+                    if (w->GetClassInfo()->GetClassName())
                     {
-                        toolbarClick = true;
-                        break;
+                        wxString cls = wxString(w->GetClassInfo()->GetClassName()).Lower();
+                        if (cls.Contains("toolbar") || cls.Contains("menubar"))
+                        {
+                            toolbarClick = true;
+                            break;
+                        }
                     }
                 }
 
@@ -373,12 +505,12 @@ void wxApp::HandleMouseEvent(wxMouseEvent *event)
     // wxPostEvent and (b) calls Refresh()/Invalidate(). Two examples in the symbol
     // chooser: expanding a wxDataViewCtrl row, and selecting a row — which posts
     // EVT_LIBITEM_SELECTED (preview + description update) / EVT_LIBITEM_CHOSEN
-    // (double-click accept+close). Inside a modal's Asyncify-driven event pump
-    // those queued events and their repaints are not flushed until the NEXT input
-    // event, so the panel lags one selection behind and double-click doesn't
+    // (double-click accept+close). Left to the per-frame tick, those queued
+    // events and their repaints land a frame later, so the panel lags one
+    // selection behind and double-click doesn't
     // close. Process the queued events and repaint synchronously after a button
     // event so the interaction takes effect immediately. Motion/wheel are excluded
-    // to avoid per-move churn; idle work stays with the pump.
+    // to avoid per-move churn; idle work stays with the per-frame tick.
     if (event->ButtonDown() || event->ButtonUp() || event->ButtonDClick())
     {
         // ProcessPendingEvents() runs synchronously: it flushes the click's queued
@@ -396,8 +528,36 @@ void wxApp::HandleMouseEvent(wxMouseEvent *event)
     }
 }
 
+// Mailbox replay for a wheel tick that arrived while a dispatch chain was
+// parked (docs/features/async/17 S1). Owns the heap copy; re-enters through
+// the public handler so the parked re-check and the interlock guard apply.
+static void WheelReplay(void *p)
+{
+    wxMouseEvent *event = static_cast<wxMouseEvent *>(p);
+    if (wxTheApp)
+        wxTheApp->HandleMouseWheelEvent(event);
+    delete event;
+}
+
 void wxApp::HandleMouseWheelEvent(wxMouseEvent *event)
 {
+    if (wxWasmMailboxMustDefer())
+    {
+        // Queue the tick for delivery when the interlock frees instead of
+        // dropping it — every tick the user made scrolls, just later (a long
+        // suspension replays them as a burst, which is the deliver-not-drop
+        // contract). The wheel resolves its target window from the CURRENT
+        // pointer position at delivery, matching what a fresh tick after
+        // resume would do.
+        // A replay reaching here through the parked chain's own wxYield()
+        // (wxWasmMailboxDeliverNested) is delivered, so zooming works inside
+        // a RunSynchronousAction spin too.
+        wxWasmMailboxEnqueueAfter(WheelReplay, new wxMouseEvent(*event), 0);
+        return;
+    }
+
+    wxWasmDispatchGuard dispatchGuard;
+
     wxPoint mousePosition = wxGetMousePosition();
     event->SetPosition(mousePosition);
     wxWindow *window = GetMouseWindow(mousePosition);
@@ -596,6 +756,324 @@ const char *GetEventName(int eventType)
     return "(Unknown)";
 }
 
+// ----------------------------------------------------------------------------
+// DOM entries hand their bodies to the scheduler as jobs
+// (wxWasmRunOnDispatchContext): the emscripten_set_*_callback entries are
+// plain table calls that cannot suspend, so a handler that reaches a wait
+// must run on a promising activation instead.
+//
+// LIFETIME. A job usually runs to completion inside wxWasmRunOnDispatchContext,
+// but it MAY suspend — a click that opens a modal keeps the job alive for the
+// dialog's lifetime. The job is therefore heap-owned, and ownership goes to
+// whoever finishes last: the job deletes itself if the caller has already
+// given up on it, otherwise the caller deletes it and reads its result.
+// ----------------------------------------------------------------------------
+namespace
+{
+
+struct wxWasmDomJob
+{
+    wxApp *app = NULL;
+    bool finished = false;
+    bool abandoned = false;
+};
+
+/** Run aJob via the scheduler; true if it completed before returning. */
+bool wxWasmRunDomJob(void (*aFn)(void *), wxWasmDomJob *aJob)
+{
+    wxWasmRunOnDispatchContext(aFn, aJob);
+
+    if (aJob->finished)
+        return true;
+
+    // Still parked (a modal, a lib fetch): it owns itself from here.
+    aJob->abandoned = true;
+    return false;
+}
+
+/** Job epilogue: hand the allocation to whoever is still around. */
+void wxWasmFinishDomJob(wxWasmDomJob *aJob)
+{
+    if (aJob->abandoned)
+        delete aJob;
+    else
+        aJob->finished = true;
+}
+
+struct wxWasmMouseJob : wxWasmDomJob
+{
+    wxMouseEvent event;
+    bool wheel = false;
+    // Touch-down synthesises a motion event before the button (see
+    // TouchCallback); both must run on the same stack, in order.
+    bool precedingMotion = false;
+};
+
+void wxWasmRunMouseJob(void *arg)
+{
+    wxWasmMouseJob *job = static_cast<wxWasmMouseJob *>(arg);
+
+    if (job->wheel)
+    {
+        job->app->HandleMouseWheelEvent(&job->event);
+    }
+    else
+    {
+        if (job->precedingMotion)
+        {
+            wxMouseEvent moveEvent(job->event);
+            moveEvent.SetEventType(wxEVT_MOTION);
+            moveEvent.SetLeftDown(false);
+            moveEvent.m_clickCount = 0;
+            job->app->HandleMouseEvent(&moveEvent);
+        }
+
+        job->app->HandleMouseEvent(&job->event);
+    }
+
+    wxWasmFinishDomJob(job);
+}
+
+struct wxWasmKeyJob : wxWasmDomJob
+{
+    wxKeyEvent event;
+    // The browser needs a synchronous answer; the job writes it here before it
+    // can park, and a job that parks anyway leaves the caller's default.
+    bool preventDefault = true;
+    // Deferred-printable pairing (wxWasmPendingKey below): non-zero when this
+    // KEY_DOWN job was queued for a later tick AFTER KeyCallback had already
+    // told the browser to allow the key's default. The browser's 'keypress'
+    // is then attached here as `charEvent` instead of running as a job of
+    // its own, and delivered after the CHAR_HOOK/KEY_DOWN phase — only if
+    // that phase did not consume the key.
+    unsigned pendingSerial = 0;
+    bool hasChar = false;
+    wxKeyEvent charEvent;
+};
+
+// ---------------------------------------------------------------------------
+// Pairing a browser 'keypress' with its deferred 'keydown'.
+//
+// Native wx generates wxEVT_CHAR only when the preceding wxEVT_CHAR_HOOK /
+// wxEVT_KEY_DOWN left the key unconsumed. In the browser the character is a
+// separate 'keypress' event, and the only way to withhold it is
+// preventDefault() on the 'keydown' — an answer KeyCallback must give BEFORE
+// the deferred wx job has run. For a plain printable key it answers "allow"
+// (an owner-drawn text control needs the character), so the 'keypress' fires
+// even when the key turns out to be a hotkey. Dispatching that 'keypress' as
+// its own wxEVT_CHAR job ran KiCad's hotkey a second time: eeschema's `R`
+// rotated 180 degrees per press (once from CHAR_HOOK, once from CHAR).
+//
+// So the 'keypress' is matched by DOM `code` to the pending deferred keydown
+// and attached to THAT job, which delivers wxEVT_CHAR after its key phase on
+// the same activation — native order, native suppression. If the key phase
+// already finished when the 'keypress' arrives, the recorded verdict decides:
+// consumed → swallow it, otherwise it runs as an ordinary character job.
+// Records are bounded (fast typing queues a few) and cleared on 'keyup'.
+// ---------------------------------------------------------------------------
+struct wxWasmPendingKey
+{
+    unsigned serial = 0;
+    std::string code;           // KeyboardEvent.code (falls back to .key)
+    wxWasmKeyJob *job = NULL;   // valid until phaseDone — the job frees itself
+    bool phaseDone = false;
+    bool consumed = false;
+};
+
+const size_t wxWasmPendingKeysMax = 16;
+
+std::deque<wxWasmPendingKey> &wxWasmPendingKeys()
+{
+    static std::deque<wxWasmPendingKey> s_keys;
+    return s_keys;
+}
+
+wxWasmPendingKey *wxWasmFindPendingKey(unsigned aSerial)
+{
+    for (wxWasmPendingKey &k : wxWasmPendingKeys())
+        if (k.serial == aSerial)
+            return &k;
+    return NULL;
+}
+
+/** Oldest record for a DOM code — 'keypress' follows its 'keydown' in order. */
+wxWasmPendingKey *wxWasmFindPendingKeyByCode(const std::string &aCode)
+{
+    for (wxWasmPendingKey &k : wxWasmPendingKeys())
+        if (k.code == aCode)
+            return &k;
+    return NULL;
+}
+
+void wxWasmErasePendingKey(unsigned aSerial)
+{
+    std::deque<wxWasmPendingKey> &keys = wxWasmPendingKeys();
+    for (std::deque<wxWasmPendingKey>::iterator it = keys.begin(); it != keys.end(); ++it)
+    {
+        if (it->serial == aSerial)
+        {
+            keys.erase(it);
+            return;
+        }
+    }
+}
+
+/** Every record for a DOM code (auto-repeat queues several) — on 'keyup'. */
+void wxWasmErasePendingKeysByCode(const std::string &aCode)
+{
+    std::deque<wxWasmPendingKey> &keys = wxWasmPendingKeys();
+    for (std::deque<wxWasmPendingKey>::iterator it = keys.begin(); it != keys.end();)
+    {
+        if (it->code == aCode)
+            it = keys.erase(it);
+        else
+            ++it;
+    }
+}
+
+wxWasmPendingKey &wxWasmAddPendingKey(const std::string &aCode, wxWasmKeyJob *aJob)
+{
+    static unsigned s_serial = 0;
+    if (++s_serial == 0)
+        s_serial = 1;
+
+    std::deque<wxWasmPendingKey> &keys = wxWasmPendingKeys();
+    while (keys.size() >= wxWasmPendingKeysMax)
+        keys.pop_front();  // stale: its job publishes into nothing, harmless
+
+    wxWasmPendingKey pending;
+    pending.serial = s_serial;
+    pending.code = aCode;
+    pending.job = aJob;
+    aJob->pendingSerial = s_serial;
+    keys.push_back(pending);
+    return keys.back();
+}
+
+std::string wxWasmKeyEventCode(const EmscriptenKeyboardEvent &aEvent)
+{
+    return aEvent.code[0] != '\0' ? std::string(aEvent.code) : std::string(aEvent.key);
+}
+
+// The port has no native accelerator path, so a KEY_DOWN chord nobody's
+// CHAR_HOOK claimed is matched against the active frame's menubar
+// accelerators ("Save\tCtrl+S") — like native menu accelerators, this fires
+// no matter which widget inside the frame has focus.
+bool TranslateMenuAccel(const wxKeyEvent &event)
+{
+#if wxUSE_MENUBAR
+    wxWindow *focus = wxWindow::FindFocus();
+    wxWindow *top = focus ? wxGetTopLevelParent(focus)
+                          : wxTheApp ? wxTheApp->GetTopWindow() : NULL;
+    wxFrame *frame = wxDynamicCast(top, wxFrame);
+    if (frame == NULL)
+        return false;
+
+    wxMenuBar *menuBar = frame->GetMenuBar();
+    return menuBar != NULL && menuBar->WasmTranslateAccel(event);
+#else
+    return false;
+#endif
+}
+
+void wxWasmRunKeyJob(void *arg)
+{
+    wxWasmKeyJob *job = static_cast<wxWasmKeyJob *>(arg);
+    wxApp *app = job->app;
+    wxKeyEvent &event = job->event;
+
+    if (event.GetEventType() == wxEVT_KEY_DOWN)
+    {
+        wxKeyEvent charHookEvent(wxEVT_CHAR_HOOK, event);
+
+        if (!app->HandleKeyEvent(&charHookEvent) ||
+            charHookEvent.IsNextEventAllowed())
+        {
+            // Menubar accelerator translation for unclaimed chords. Skipped
+            // while a dispatch is parked: HandleKeyEvent only queued the
+            // event above, and firing a menu handler now would interleave
+            // with the suspended chain's half-mutated state.
+            if (!wxWasmDispatchParked() && TranslateMenuAccel(event))
+            {
+                job->preventDefault = true;
+            }
+            // The browser does not generate char events for some key codes
+            else if (KeyCodeNeedsCharEvent(event.GetKeyCode()))
+            {
+                if (!app->HandleKeyEvent(&event))
+                {
+                    wxKeyEvent charEvent(wxEVT_CHAR, event);
+                    app->HandleKeyEvent(&charEvent);
+                }
+            }
+            else
+            {
+                // By default, emscripten generates char events
+                job->preventDefault = app->HandleKeyEvent(&event);
+            }
+        }
+        else
+        {
+            // The CHAR_HOOK was claimed (a hotkey): suppress the browser
+            // default (Ctrl/Cmd+S must not open the save-page dialog).
+            job->preventDefault = true;
+        }
+
+        // Deferred-printable pairing epilogue (wxWasmPendingKey). After the
+        // key phase `preventDefault` is exactly "the key was consumed": a
+        // claimed CHAR_HOOK, a menubar accelerator and a handled KEY_DOWN all
+        // set it; only an unhandled KEY_DOWN clears it. (While a dispatch
+        // chain is parked HandleKeyEvent queues the events and reports them
+        // handled, so the character is dropped — the same outcome the
+        // synchronous path had when it still cancelled every 'keypress'.)
+        const bool consumed = job->preventDefault;
+
+        if (job->pendingSerial != 0)
+        {
+            if (wxWasmPendingKey *pending = wxWasmFindPendingKey(job->pendingSerial))
+            {
+                pending->job = NULL;
+                pending->phaseDone = true;
+                pending->consumed = consumed;
+            }
+        }
+
+        if (job->hasChar)
+        {
+            wxWasmErasePendingKey(job->pendingSerial);
+            if (!consumed)
+                app->HandleKeyEvent(&job->charEvent);
+        }
+    }
+    else
+    {
+        app->HandleKeyEvent(&event);
+    }
+
+    wxWasmFinishDomJob(job);
+}
+
+}  // namespace
+
+// A keydown whose browser default (if any) is harmless and whose 'keypress'
+// we need: single-character key without Ctrl/Meta/Alt (Shift is fine).
+bool KeyEventIsPlainPrintable(const EmscriptenKeyboardEvent &ev)
+{
+    if (ev.ctrlKey || ev.metaKey || ev.altKey)
+        return false;
+
+    const char *key = ev.key;
+    if (key[0] == '\0')
+        return false;
+
+    // One UTF-8 code point: ASCII byte, or a lead byte followed only by
+    // continuation bytes.
+    size_t i = 1;
+    while (key[i] != '\0' && (static_cast<unsigned char>(key[i]) & 0xC0) == 0x80)
+        i++;
+    return key[i] == '\0' && (static_cast<unsigned char>(key[0]) >= 0x20);
+}
+
 EM_BOOL KeyCallback(int eventType,
                     const EmscriptenKeyboardEvent *emscriptenEvent,
                     void *userData)
@@ -619,20 +1097,23 @@ EM_BOOL KeyCallback(int eventType,
                            ae.isContentEditable)) ? 1 : 0;
         }))
     {
-        if (strcmp(emscriptenEvent->key, "Escape") != 0)
+        // App-owned chords still reach wx even from inside a text field —
+        // native menu accelerators fire regardless of focus, and the
+        // browser default (Cmd/Ctrl+S = save page) is never wanted.
+        // Editing chords (Cmd+C/V/X/A/Z/…) stay with the input.
+        const char *key = emscriptenEvent->key;
+        const bool saveChord =
+            (emscriptenEvent->ctrlKey || emscriptenEvent->metaKey) &&
+            !emscriptenEvent->altKey &&
+            (key[0] == 's' || key[0] == 'S') && key[1] == '\0';
+
+        if (strcmp(key, "Escape") != 0 && !saveChord)
             return EM_FALSE;
     }
 
     wxApp* app = static_cast<wxApp*>(userData);
-    // Printable browser keys normally arrive as keydown followed by keypress.
-    // Build the complete wx sequence from keydown and consume the later DOM
-    // keypress. This is deterministic across browsers and, importantly, keeps
-    // applications which bind both CHAR_HOOK and CHAR (KiCad) from seeing one
-    // physical hotkey twice if a browser still emits keypress.
-    if (eventType == EMSCRIPTEN_EVENT_KEYPRESS)
-        return EM_TRUE;
-
     wxKeyEvent event;
+    bool preventDefault = true;
 
     if (EmscriptenKeyboardEventToWXEvent(eventType, *emscriptenEvent, &event))
     {
@@ -644,39 +1125,77 @@ EM_BOOL KeyCallback(int eventType,
                        static_cast<const char*>(key_char.utf8_str()));
         */
 
-        if (event.GetEventType() == wxEVT_KEY_DOWN)
-        {
-            wxKeyEvent charHookEvent(wxEVT_CHAR_HOOK, event);
+        const std::string domCode = wxWasmKeyEventCode(*emscriptenEvent);
 
-            if (!app->HandleKeyEvent(&charHookEvent) ||
-                charHookEvent.IsNextEventAllowed())
+        if (eventType == EMSCRIPTEN_EVENT_KEYPRESS)
+        {
+            // A character whose 'keydown' job was deferred (wxWasmPendingKey):
+            // it belongs to that job, not to a job of its own.
+            if (wxWasmPendingKey *pending = wxWasmFindPendingKeyByCode(domCode))
             {
-                if (!app->HandleKeyEvent(&event))
+                if (!pending->phaseDone)
                 {
-                    // Use the browser's translated key value for CHAR (e.g.
-                    // lowercase 'r'), while KEY_DOWN/CHAR_HOOK retain the
-                    // physical-key code ('R'). Previously printable CHAR was
-                    // deferred to DOM keypress while special keys were
-                    // synthesized here, which allowed the two paths to diverge.
-                    wxKeyEvent charEvent;
-                    if (EmscriptenKeyboardEventToWXEvent(
-                            EMSCRIPTEN_EVENT_KEYPRESS, *emscriptenEvent, &charEvent))
-                    {
-                        app->HandleKeyEvent(&charEvent);
-                    }
+                    // The keydown's CHAR_HOOK/KEY_DOWN have not run yet (or
+                    // are parked): attach, the job decides after its key
+                    // phase. A canvas 'keypress' has no browser default worth
+                    // keeping (Firefox quick-find on '/' is the exception —
+                    // and unwanted).
+                    pending->job->hasChar = true;
+                    pending->job->charEvent = event;
+                    return EM_TRUE;
                 }
+
+                // The key phase already ran: apply its verdict.
+                const bool consumed = pending->consumed;
+                wxWasmErasePendingKey(pending->serial);
+                if (consumed)
+                    return EM_TRUE;  // native wx: no wxEVT_CHAR after a claimed key
+                // else: an ordinary character for the focused control — fall
+                // through to the normal job below.
             }
+        }
+        else if (eventType == EMSCRIPTEN_EVENT_KEYUP)
+        {
+            // 'keypress' always precedes 'keyup': whatever is still recorded
+            // for this key will not be paired any more (auto-repeat may have
+            // queued several). Attached characters live on their jobs.
+            wxWasmErasePendingKeysByCode(domCode);
+        }
+
+        wxWasmKeyJob* job = new wxWasmKeyJob();
+        job->app = app;
+        job->event = event;
+
+        if (wxWasmRunDomJob(&wxWasmRunKeyJob, job))
+        {
+            preventDefault = job->preventDefault;
+            delete job;
         }
         else
         {
-            app->HandleKeyEvent(&event);
+            // No synchronous answer: the handler parked (a modal opened from
+            // a key), or — the common case — this plain (non-promising) DOM
+            // entry had to queue the job for the promising job tick
+            // (wxWasmRunOnDispatchContext). The browser cannot wait, so
+            // decide the default here. Preventing it for a plain printable
+            // key would cancel the browser's 'keypress', which is the ONLY
+            // source of wxEVT_CHAR in this port — canvas-drawn text widgets
+            // (wxStyledTextCtrl grid editors) then never receive typed
+            // characters. Let plain printable keys through (their browser
+            // default outside an editable is nothing); keep suppressing
+            // chords, Tab, function keys etc. as before.
+            preventDefault = !KeyEventIsPlainPrintable(*emscriptenEvent);
+
+            // That 'keypress' WILL fire now, whether or not the deferred
+            // CHAR_HOOK/KEY_DOWN turn out to consume the key. Record the
+            // keydown so the character is paired with this job instead of
+            // becoming an independent wxEVT_CHAR (wxWasmPendingKey).
+            if (!preventDefault && eventType == EMSCRIPTEN_EVENT_KEYDOWN)
+                wxWasmAddPendingKey(domCode, job);
         }
     }
 
-    // The wx sequence above completely owns non-editable keyboard input. In
-    // particular, cancelling keydown prevents a browser-generated keypress;
-    // the explicit keypress guard above covers engines which still emit it.
-    return EM_TRUE;
+    return preventDefault;
 }
 
 EM_BOOL MouseCallback(int eventType,
@@ -691,7 +1210,12 @@ EM_BOOL MouseCallback(int eventType,
 
     if (EmscriptenMouseEventToWXEvent(eventType, *emscriptenEvent, &event))
     {
-        app->HandleMouseEvent(&event);
+        wxWasmMouseJob* job = new wxWasmMouseJob();
+        job->app = app;
+        job->event = event;
+
+        if (wxWasmRunDomJob(&wxWasmRunMouseJob, job))
+            delete job;
     }
 
     return true;
@@ -709,18 +1233,17 @@ EM_BOOL TouchCallback(int eventType,
 
     if (EmscriptenTouchEventToWXEvent(eventType, *emscriptenEvent, &event))
     {
-        if (event.GetEventType() == wxEVT_LEFT_DOWN)
-        {
-            // Mirroring browser behavior, move the mouse to the new location
-            // before sending the mouse down event.
-            wxMouseEvent moveEvent(event);
-            moveEvent.SetEventType(wxEVT_MOTION);
-            moveEvent.SetLeftDown(false);
-            moveEvent.m_clickCount = 0;
-            app->HandleMouseEvent(&moveEvent);
+        wxWasmMouseJob* job = new wxWasmMouseJob();
+        job->app = app;
+        job->event = event;
+        // Mirroring browser behavior, move the mouse to the new location
+        // before sending the mouse down event (synthesised inside the job so
+        // both events reach wx on the same stack, in order).
+        job->precedingMotion = (event.GetEventType() == wxEVT_LEFT_DOWN);
 
-        }
-        app->HandleMouseEvent(&event);
+        if (wxWasmRunDomJob(&wxWasmRunMouseJob, job))
+            delete job;
+
         return true;
     } else {
         return false;
@@ -742,7 +1265,13 @@ EM_BOOL WheelCallback(int WXUNUSED(eventType),
 
     if (EmscriptenWheelEventToWXEvent(*emscriptenEvent, wxVERTICAL, &event))
     {
-        app->HandleMouseWheelEvent(&event);
+        wxWasmMouseJob* job = new wxWasmMouseJob();
+        job->app = app;
+        job->event = event;
+        job->wheel = true;
+
+        if (wxWasmRunDomJob(&wxWasmRunMouseJob, job))
+            delete job;
     }
 
     return true;
@@ -888,9 +1417,28 @@ void OnFileDropped(const char* path, int x, int y)
 {
     // printf("[DND] OnFileDropped: %s at (%d, %d)\n", path, x, y);
 
-    // Find the window that should receive the drop event
+    // Find the window under the drop point
     wxPoint dropPoint(x, y);
     wxWindow* target = wxFindWindowAtPoint(dropPoint);
+
+    // G-14: wxDropFilesEvent does NOT propagate upward, and the windows that
+    // registered interest via DragAcceptFiles() are ancestors (KiCad's frames)
+    // while the leaf under the pointer is a child panel/canvas — delivering to
+    // the leaf silently lost every drop. On non-MSW ports DragAcceptFiles()
+    // works by installing a wxDropTarget (wincmn.cpp, DragAcceptFilesTarget),
+    // so "accepts drops" is queryable as GetDropTarget() != NULL — the same
+    // test the in-app drag path uses (src/wasm/dnd.cpp). Walk up to the first
+    // such window, falling back to the leaf's top-level window. (A custom
+    // non-file wxDropTarget up-chain would win this walk; the port's real
+    // consumers all use DragAcceptFiles, so that trade-off is acceptable.)
+    for (wxWindow* w = target; w != nullptr; w = w->GetParent())
+    {
+        if (w->GetDropTarget() != nullptr || w->IsTopLevel())
+        {
+            target = w;
+            break;
+        }
+    }
 
     // Fall back to top window if no window found at point
     if (target == nullptr && wxTheApp != nullptr)
@@ -908,7 +1456,7 @@ void OnFileDropped(const char* path, int x, int y)
     wxString* files = new wxString[1];
     files[0] = wxString::FromUTF8(path);
 
-    // Create and dispatch the drop files event
+    // Create the drop files event
     wxDropFilesEvent event(wxEVT_DROP_FILES, 1, files);
     event.SetEventObject(target);
 
@@ -916,7 +1464,16 @@ void OnFileDropped(const char* path, int x, int y)
     wxPoint clientPos = target->ScreenToClient(dropPoint);
     event.m_pos = clientPos;
 
-    target->HandleWindowEvent(event);
+    // G-14 (part 2): deliver on the event queue, never synchronously. This
+    // plain export is not a promising entry, so a drop handler that suspends
+    // under JSPI (KiCad's append-board flow reads files and can raise
+    // dialogs) would die with SuspendError before the fix reached it. Queued
+    // delivery runs under the pump's promising tick where suspension is
+    // legal, and honors the parked-dispatch discipline the same way
+    // HandleMouseEvent's parked path does. wxPostEvent clones the event
+    // (wxDropFilesEvent deep-copies its file array), and the stack copy here
+    // still frees the original array.
+    wxPostEvent(target->GetEventHandler(), event);
 }
 
 } // extern "C"

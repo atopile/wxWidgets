@@ -21,6 +21,51 @@
   var inputs = new Map();   // domId -> value-bearing element (if != root)
   var labels = new Map();   // domId -> label text target (if != root)
 
+  // Dark-theme overrides for the DOM widgets (pcbjam comments-ux 0002): the
+  // factory below sets "classic light" INLINE styles; these html.dark-scoped
+  // !important rules override them live when the embedding page toggles its
+  // theme class — no per-element re-styling, and light mode is untouched.
+  // Keep the palette aligned with the wx wasm system-colour table
+  // (src/wasm/settings.cpp): face #2d2d3e, window #1e1e2c, text #e4e4ee.
+  (function injectDarkThemeStyles() {
+    var css =
+      'html.dark [data-wx-menu-bar="1"],' +
+      'html.dark [data-wx-tool-bar="1"]{background:#2d2d3e !important;}' +
+      'html.dark [data-wx-menu-bar="1"] .wx-menu-title{color:#e4e4ee !important;}' +
+      'html.dark .wx-menu-popup{background:#2d2d3e !important;' +
+        'border-color:#121220 !important;color:#e4e4ee !important;}' +
+      'html.dark [data-wx-check-list="1"]{background:#1e1e2c !important;' +
+        'border-color:#121220 !important;color:#e4e4ee !important;}' +
+      'html.dark .wx-tab-strip{background:#2d2d3e !important;' +
+        'border-bottom-color:#121220 !important;}' +
+      'html.dark .wx-tab-strip button{background:#23233a !important;' +
+        'color:#e4e4ee !important;border-color:#121220 !important;}' +
+      'html.dark .wx-tab-strip button[aria-selected="true"]' +
+        '{background:#3a3a54 !important;}' +
+      'html.dark #wx-tooltip{background:#2d2d3e !important;' +
+        'color:#e4e4ee !important;border-color:#5a5a72 !important;}' +
+      'html.dark .wx-tool{color:#e4e4ee !important;}' +
+      'html.dark .wx-tool[data-wx-toggled="1"]{background:#3d6ae0 !important;}' +
+      'html.dark [data-wx-scrollbar="1"]{background:#23233a !important;}' +
+      'html.dark [data-wx-scrollbar="1"] .wx-sb-thumb{background:#4a4a62 !important;' +
+        'border-color:#5a5a72 !important;}' +
+      // Native form controls (select/input/textarea .wx-dom-control): the page's
+      // dark foreground bleeds into them while their native background stays
+      // white — restyle both, and flip color-scheme so the dropdown list and
+      // caret follow.
+      'html.dark select.wx-dom-control,' +
+      'html.dark input.wx-dom-control,' +
+      'html.dark textarea.wx-dom-control{background:#1e1e2c !important;' +
+        'color:#e4e4ee !important;border-color:#121220 !important;' +
+        'color-scheme:dark;}' +
+      // checkbox/radio inputs are CHILDREN of a label.wx-dom-control, so the
+      // rule above never reaches them; flip their color-scheme too.
+      'html.dark label.wx-dom-control{color-scheme:dark;}';
+    var style = document.createElement('style');
+    style.id = 'wx-dom-dark-theme';
+    style.textContent = css;
+    document.head.appendChild(style);
+  })();
   // wxSystemColour indices (include/wx/settings.h). C++ reads the same
   // globalThis.wxSystemColors array in src/wasm/settings.cpp; CSS variables
   // keep DOM-backed controls on that exact palette instead of a second,
@@ -74,7 +119,13 @@
   // Mirror of wxDomEventKind in include/wx/wasm/window.h.
   var EVT = { CLICK: 1, INPUT: 2, CHANGE: 3, FOCUSIN: 4, FOCUSOUT: 5,
               ENTER: 6, SPIN_UP: 7, SPIN_DOWN: 8, MENU: 9, TOOL: 10,
-              TAB: 11, SCROLL: 12 };
+              TAB: 11, SCROLL: 12,
+              KEY_UP: 13, KEY_DOWN: 14, KEY_PAGEUP: 15, KEY_PAGEDOWN: 16,
+              DBLCLICK: 17 };
+  // Navigation keys an <input> does not need for editing, forwarded to wx as
+  // wxEVT_CHAR_HOOK (findings O-2: filter-box Enter/arrows were dead).
+  var NAV_KEY_EVT = { ArrowUp: EVT.KEY_UP, ArrowDown: EVT.KEY_DOWN,
+                      PageUp: EVT.KEY_PAGEUP, PageDown: EVT.KEY_PAGEDOWN };
 
   // Last pointer position in viewport (clientX/Y) coordinates — read by
   // wxShowContextMenu when DoPopupMenu is invoked "at the mouse" (the KiCad
@@ -88,11 +139,28 @@
   window.wxDomControls = controls;
 
   function dispatch(domId, kind) {
-    try {
-      Module['ccall']('wx_dom_event', null, ['number', 'number'], [domId, kind]);
-    } catch (e) {
+    // Containment for a chain that died mid-flight (trap, or a throwing wx
+    // event handler): its dispatch-interlock guard never unwound — release it
+    // or every later event defers forever behind a chain that is gone.
+    // Guarded: defends against serving a stale output/ mix where this glue
+    // and the wasm disagree about the export set.
+    var contain = function (e) {
       // Surfaces in test logs; must never throw back into DOM event handlers.
       console.error('wx_dom_event(' + domId + ',' + kind + ') failed:', e);
+      try {
+        Module['ccall']('wx_dispatch_abandon', null, [], []);
+      } catch (e2) {
+        /* nothing else to do - the runtime is already in trouble */
+      }
+    };
+    try {
+      var p = Module['ccall']('wx_dom_event', null, ['number', 'number'], [domId, kind]);
+      // JSPI: wx_dom_event is a PROMISING export — a throwing handler
+      // surfaces as an async REJECTION of the returned promise, which the
+      // sync catch below can never see.
+      if (p && typeof p.then === 'function') p.then(null, contain);
+    } catch (e) {
+      contain(e);
     }
   }
 
@@ -118,9 +186,15 @@
       case 'checkbox':
       case 'radio': {
         root = document.createElement('label');
+        // Breathing room around the row: measured into the intrinsic size, so
+        // sizers pick it up (wxDomCreateControl only force-zeroes padding on
+        // controls that didn't set their own).
+        root.style.padding = '3px 0';
         input = document.createElement('input');
         input.type = type;
-        input.style.margin = '0 3px 0 0';
+        input.style.margin = '0 5px 0 0';
+        // Never let a too-narrow rect crush the box into the label.
+        input.style.flexShrink = '0';
         label = document.createElement('span');
         label.className = 'wx-label';
         root.appendChild(input);
@@ -202,6 +276,14 @@
       case 'listbox': {
         root = document.createElement('select');
         root.multiple = true;
+        root.dataset.wxListBox = '1';
+        // wxListBox is the one interactive control whose wx-side mouse
+        // events are part of its contract: native ports deliver
+        // wxEVT_LEFT_DOWN for a click on a row (KiCad's FILTER_COMBOPOPUP
+        // — the net/footprint/symbol filter dropdowns — accepts a row from
+        // exactly that event + HitTest). Forward LEFT presses alongside
+        // the browser's own row selection; see the input-forwarding block.
+        root.dataset.wxForwardLeft = '1';
         break;
       }
       case 'spinbutton': {
@@ -241,6 +323,10 @@
       case 'image': {
         root = document.createElement('img');
         root.dataset.wxChrome = '1'; // non-interactive like statbmp
+        // Layout may hand the <img> a rect bigger than the bitmap (sizer
+        // stretch, min-size constraints); keep the aspect instead of the
+        // default object-fit:fill smear.
+        root.style.objectFit = 'contain';
         break;
       }
       case 'combobox': {
@@ -386,6 +472,13 @@
         dispatch(domId, EVT.CLICK);
         ev.stopPropagation();
       });
+      if (el.dataset.wxListBox) {
+        // Row double-click -> wxEVT_LISTBOX_DCLICK (see wxListBox::OnDomEvent).
+        el.addEventListener('dblclick', function (ev) {
+          dispatch(domId, EVT.DBLCLICK);
+          ev.stopPropagation();
+        });
+      }
       el.addEventListener('focusin', function () {
         if (isEditable(valueEl)) {
           window.wxDomEditableFocused = 1;
@@ -423,6 +516,12 @@
         valueEl.addEventListener('keydown', function (ev) {
           if (ev.key === 'Enter' && valueEl.tagName === 'INPUT') {
             dispatch(domId, EVT.ENTER);
+          } else if (valueEl.tagName === 'INPUT' && NAV_KEY_EVT[ev.key] &&
+                     !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+            // Fire-and-forget: wx_dom_event is a promising export, so the
+            // browser default (caret to start/end) cannot be gated on the
+            // handler's answer — harmless in a single-line input.
+            dispatch(domId, NAV_KEY_EVT[ev.key]);
           }
           // Typing belongs to the input; don't let the window-level
           // Emscripten keyboard handler see it (belt — the C++ callback
@@ -471,6 +570,9 @@
     el.style.top = y + 'px';
     el.style.width = w + 'px';
     el.style.height = h + 'px';
+    // A control that moves under (or out from under) an open secondary window
+    // changes the input-barrier geometry — wx.js recomputes it (rAF-coalesced).
+    wxScheduleBarrierRecompute();
     // Notebook tabs register their viewport rects in the e2e registry;
     // unlike canvas tabs they don't repaint on move, so re-sync here.
     if (el.dataset.wxNotebook && el._wxTabs) {
@@ -499,12 +601,56 @@
 
   window.wxDomSetValue = function (domId, value) {
     var el = inputs.get(domId) || controls.get(domId);
-    if (el) el.value = value;
+    // Skip no-op assignments: setting .value always collapses the caret to
+    // the end, which would clobber a selection placed by wxDomSetSelection.
+    if (el && el.value !== value) el.value = value;
   };
 
   window.wxDomGetValue = function (domId) {
     var el = inputs.get(domId) || controls.get(domId);
     return el ? String(el.value) : '';
+  };
+
+  // Caret/selection of an <input>/<textarea>. selectionStart/End only exist
+  // on text-selectable elements (and throw on some input types), so report
+  // -1 when unsupported — the C++ side falls back to its cache.
+  window.wxDomGetSelectionStart = function (domId) {
+    var el = inputs.get(domId) || controls.get(domId);
+    try {
+      if (el && typeof el.selectionStart === 'number') return el.selectionStart;
+    } catch (e) { /* unsupported input type */ }
+    return -1;
+  };
+
+  window.wxDomGetSelectionEnd = function (domId) {
+    var el = inputs.get(domId) || controls.get(domId);
+    try {
+      if (el && typeof el.selectionEnd === 'number') return el.selectionEnd;
+    } catch (e) { /* unsupported input type */ }
+    return -1;
+  };
+
+  window.wxDomSetSelection = function (domId, start, end) {
+    var el = inputs.get(domId) || controls.get(domId);
+    if (!el || typeof el.setSelectionRange !== 'function') return;
+    var apply = function () {
+      try { el.setSelectionRange(start, end); } catch (e) { /* unsupported type */ }
+    };
+    apply();
+    // A selection set on a blurred <input> is dropped when the element is
+    // later focused (the browser restores its own caret on focus). KiCad's
+    // dialog select-all-on-open runs while the field is still unfocused and
+    // then focuses it, so re-apply the range once on the next focus to make
+    // "select then focus" (type-to-replace) behave like native.
+    if (document.activeElement !== el) {
+      if (el.__wxReselect) el.removeEventListener('focus', el.__wxReselect);
+      el.__wxReselect = function () {
+        apply();
+        el.removeEventListener('focus', el.__wxReselect);
+        el.__wxReselect = null;
+      };
+      el.addEventListener('focus', el.__wxReselect);
+    }
   };
 
   // Boolean state: checkbox/radio checked, toggle button pressed.
@@ -858,18 +1004,27 @@
               el.options[index].selected);
   };
 
-  // Map wx client coordinates to the native <option> under the pointer.
-  // DOM rectangles include native row sizing and the select's scroll offset.
+  // wxListBox::HitTest: the row index under a point given in the control's
+  // own client coordinates (CSS px from its top-left), -1 for none. Rows are
+  // the <option>s of a <select multiple> or the row elements of a checklist;
+  // geometry comes from the live layout, so scrolling is accounted for.
   window.wxDomListHitTest = function (domId, x, y) {
     var el = controls.get(domId);
-    if (!el || el.tagName !== 'SELECT') return -1;
-    var root = el.getBoundingClientRect();
-    var clientX = root.left + x;
-    var clientY = root.top + y;
-    for (var i = 0; i < el.options.length; i++) {
-      var r = el.options[i].getBoundingClientRect();
-      if (clientX >= r.left && clientX < r.right &&
-          clientY >= r.top && clientY < r.bottom) return i;
+    if (!el) return -1;
+    var base = el.getBoundingClientRect();
+    var px = base.left + x;
+    var py = base.top + y;
+    if (px < base.left || py < base.top ||
+        px >= base.right || py >= base.bottom) {
+      return -1;
+    }
+    var rows = el.dataset.wxCheckList ? el.children : el.options;
+    for (var i = 0; i < rows.length; i++) {
+      var r = rows[i].getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue;
+      if (px >= r.left && px < r.right && py >= r.top && py < r.bottom) {
+        return i;
+      }
     }
     return -1;
   };
@@ -939,6 +1094,17 @@
   window.wxDomFocus = function (domId) {
     var el = inputs.get(domId) || controls.get(domId);
     if (el && document.activeElement !== el) el.focus();
+  };
+
+  // Counterpart of wxDomFocus for wx focus moving to a canvas-drawn window
+  // (wxWindowWasm::SetFocus): drop browser focus from the wx-dom control that
+  // still has it, so keys go back to wx. Controls outside wx-dom (the host
+  // page's own inputs) are never touched.
+  window.wxDomBlurActive = function () {
+    var ae = document.activeElement;
+    if (ae && ae !== document.body && ae.closest && ae.closest('.wx-dom-control')) {
+      ae.blur();
+    }
   };
 
   window.wxDomSetFont = function (domId, cssFont) {
@@ -1090,12 +1256,13 @@
   // ========== Context menu (wxWindow::PopupMenu -> DoPopupMenu) ==========
   //
   // Shows a standalone popup at a viewport point and BLOCKS the synchronous
-  // C++ DoPopupMenu via the same ProcessEvents pump wxDialog::ShowModal uses
-  // (src/wasm/dialog.cpp): the EM_ASYNC_JS wxDomPopupMenuModal in
+  // C++ DoPopupMenu: the EM_ASYNC_JS wxDomPopupMenuModal in
   // src/wasm/window.cpp awaits the returned Promise, which resolves with the
-  // chosen command id (-1 = cancelled). json: the wxMenu serialized by
-  // wxMenu::WasmItemsToJson(). x/y in viewport px, or -1 (wxDefaultCoord) to
-  // use the last pointer position (the KiCad canvas right-click case).
+  // chosen command id (-1 = cancelled). The top-level tick keeps dispatching
+  // and painting while the opener's chain is parked. json: the wxMenu
+  // serialized by wxMenu::WasmItemsToJson(). x/y in viewport px, or -1
+  // (wxDefaultCoord) to use the last pointer position (the KiCad canvas
+  // right-click case).
   Module['wxShowContextMenu'] = function (json, invokerDomId, x, y) {
     var items;
     try {
@@ -1179,30 +1346,10 @@
       document.addEventListener('mousedown', onOutside, true);
       document.addEventListener('keydown', onKey, true);
 
-      // Pump wx while the popup is open so the suspended coroutine stack
-      // (DoPopupMenu is called from inside a tool) stays parked and the app
-      // keeps painting. Must NEVER stop without resolving (a pending Promise
-      // would freeze the parked stack) — any error cancels the menu loudly.
-      (function pump() {
-        if (settled) return;
-        setTimeout(function () {
-          if (settled) return;
-          var p;
-          try {
-            p = Module['ccall']('ProcessEvents', 'void', [], [], { async: true });
-          } catch (e) {
-            console.error('[wxWasm] context menu pump error: ' + e);
-            settle(-1);
-            return;
-          }
-          Promise.resolve(p).then(
-            function () { if (!settled) pump(); },
-            function (e) {
-              console.error('[wxWasm] context menu pump error: ' + e);
-              settle(-1);
-            });
-        }, 17);
-      })();
+      // NO popup pump (docs/features/async/17 S4): the top-level tick is the
+      // sole dispatcher and keeps the app painting while DoPopupMenu's chain
+      // is suspended. The menu itself is DOM, its events dispatch as fresh
+      // entries.
     });
   };
 
@@ -1291,6 +1438,7 @@
         btn.style.background = 'var(--wx-highlight)';
         btn.style.color = 'var(--wx-highlight-text)';
       }
+      if (t.toggled) btn.dataset.wxToggled = '1';
       btn.addEventListener('click', function (ev) {
         ev.stopPropagation();
         el.dataset.wxLastCommand = String(t.id);
@@ -1592,10 +1740,12 @@
   // Invariants (prevent double dispatch):
   //  - events targeting #canvas take only the Emscripten path;
   //  - events targeting DOM controls take only this path;
-  //  - Native control click/change events and wx mouse down/up are distinct
-  //    wx event types. Forward all buttons for DOM controls so application
-  //    wxEVT_LEFT_DOWN handlers still run; the native click listener remains
-  //    the sole source of command events such as wxEVT_BUTTON.
+  //  - LEFT clicks on interactive controls take only the native control
+  //    path (their click listeners + wx_dom_event); we forward left
+  //    clicks only for passive controls (dataset.wxPassive: statictext,
+  //    gauge) and for controls whose wx contract includes them
+  //    (dataset.wxForwardLeft: wxListBox — LEFT_DOWN + HitTest is how
+  //    KiCad's filter popups accept a row), middle/right always.
   // NOTE: listeners that stopPropagation on mousedown (menubar titles)
   // intentionally opt out of forwarding.
 
@@ -1644,16 +1794,20 @@
     if (forwardTarget(ev)) wxForwardMouse(ev, 1, 0);
   });
 
+  function forwardsLeft(ctl) {
+    return !!(ctl.dataset.wxPassive || ctl.dataset.wxForwardLeft);
+  }
+
   document.addEventListener('mousedown', function (ev) {
     var ctl = forwardTarget(ev);
     if (!ctl) return;
-    wxForwardMouse(ev, 2, 0);
+    if (ev.button !== 0 || forwardsLeft(ctl)) wxForwardMouse(ev, 2, 0);
   });
 
   document.addEventListener('mouseup', function (ev) {
     var ctl = forwardTarget(ev);
     if (!ctl) return;
-    wxForwardMouse(ev, 3, 0);
+    if (ev.button !== 0 || forwardsLeft(ctl)) wxForwardMouse(ev, 3, 0);
   });
 
   document.addEventListener('wheel', function (ev) {

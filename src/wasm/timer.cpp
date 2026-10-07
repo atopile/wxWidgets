@@ -14,9 +14,12 @@
 #include "wx/evtloop.h"
 #include "wx/log.h"
 
+#include "wx/wasm/private/dispatch.h"
+#include "wx/wasm/private/mailbox.h"
 #include "wx/wasm/private/timer.h"
 
 #include <emscripten.h>
+#include <stdio.h>   // printf: diagnostics land in the browser console
 
 // ----------------------------------------------------------------------------
 // wxTimerImpl
@@ -77,15 +80,51 @@ void wxWasmTimerImpl::ScheduleNextInterval()
 
 void wxWasmTimerImpl::ScheduleTimerCallback(int millisecs, TimerCallbackFunc *callbackFunc)
 {
-    emscripten_async_call(TimerCallback, callbackFunc, millisecs);
+    // The expiry lands in the mailbox and the shim's delivery tick invokes
+    // it through the promising _wxWasmMailboxTick export, so a timer can no
+    // longer enter the wasm on top of a suspended chain — Run()'s
+    // parked-retry below is a tripwire that should never fire.
+    wxWasmMailboxEnqueueAfter(TimerCallback, callbackFunc, millisecs);
 }
 
 void TimerCallbackFunc::Run()
 {
     bool selfDestruct = true;
 
+    if (!IsCanceled() && wxWasmMailboxMustDefer())
+    {
+        // TRIPWIRE (should never fire): the mailbox only delivers when the
+        // dispatch interlock is free - or, for a NESTED delivery, on behalf
+        // of the parked chain's own wxYield() (wxWasmMailboxDeliverNested;
+        // that case is not a deferral). Otherwise Run() cannot be entered
+        // parked via the mailbox lane. If it fires anyway, re-queue rather
+        // than run the handler over the parked chain's half-mutated widget
+        // state - ScheduleNextInterval()'s deadline bookkeeping keeps
+        // periodic timers on cadence afterwards. Reported at escalating
+        // thresholds (~59 retries/second at 17ms).
+        ++m_parkRetries;
+        if (m_parkRetries == 60 || m_parkRetries == 300 || m_parkRetries == 1200 ||
+            (m_parkRetries > 1200 && m_parkRetries % 1200 == 0))
+        {
+            printf("[wx-timer] retry storm: %d retries (~%ds parked, depth=%d) "
+                   "- a dispatch chain has been parked this whole time\n",
+                   m_parkRetries, (m_parkRetries * 17) / 1000, wxWasmDispatchDepth);
+        }
+        wxWasmMailboxEnqueueAfter(TimerCallback, this, 17);
+        return;
+    }
+
+    if (m_parkRetries >= 60)
+    {
+        printf("[wx-timer] retry storm ended after %d retries (~%ds)\n",
+               m_parkRetries, (m_parkRetries * 17) / 1000);
+    }
+    m_parkRetries = 0;
+
     if (!IsCanceled())
     {
+        wxWasmDispatchGuard dispatchGuard;
+
         wxWasmTimerImpl *timer = GetTimerImpl();
 
         if (timer->IsOneShot())

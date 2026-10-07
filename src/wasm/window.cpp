@@ -8,7 +8,10 @@
 
 #include "wx/wxprec.h"
 
+#include <vector>
+
 #include "wx/window.h"
+#include "wx/popupwin.h"
 
 #include "wx/app.h"
 #include "wx/caret.h"
@@ -20,9 +23,11 @@
 #include "wx/wasm/private/display.h"
 
 #include "wx/settings.h"
+#include "wx/wasm/private/dispatch.h"
 #include "wx/wasm/private/dom.h"
 
 #include <emscripten.h>
+#include <map>
 
 #if wxUSE_COMBOBOX || wxUSE_COMBOCTRL
 #include "wx/combo.h"
@@ -34,7 +39,141 @@
 wxWindow *g_mouseWindow = NULL;
 
 static wxWindowWasm *gs_focusWindow = NULL;
+
+// P-4 (pcbjam findings group P): a top-level window's SetFocus() must land on a CHILD, the way
+// the native ports behave (GTK/MSW give a frame's focus to its last-focused descendant). This
+// port keeps one flat gs_focusWindow, so `frame->SetFocus()` — what KIWAY_PLAYER::ShowModal
+// does to hand focus back after a modal chooser — focused the frame itself and every hotkey
+// was delivered to a window that has no key handlers (KiCad's tool dispatcher listens on the
+// canvas) until the next mouse click. Remember, per top-level window, the descendant that last
+// held focus; entries die with either window (see the destructor).
+static std::map<wxWindowWasm *, wxWindowWasm *> gs_lastFocusedChild;
+
+static wxWindowWasm *wxWasmTopLevelOf(wxWindowWasm *win)
+{
+    wxWindow *w = win;
+    while (w && !w->IsTopLevel())
+        w = w->GetParent();
+    return static_cast<wxWindowWasm *>(w);
+}
+
+// Toolbars and menubars never hold keyboard focus on the native ports (app.cpp's click
+// path exempts them too) — never hand a frame's focus to one.
+static bool wxWasmIsBarWindow(wxWindow *w)
+{
+    for (; w != NULL && !w->IsTopLevel(); w = w->GetParent())
+    {
+        if (w->GetClassInfo()->GetClassName())
+        {
+            wxString cls = wxString(w->GetClassInfo()->GetClassName()).Lower();
+            if (cls.Contains("toolbar") || cls.Contains("menubar"))
+                return true;
+        }
+    }
+    return false;
+}
+
+// The descendant a frame's focus should land on when nothing was focused before: the
+// LARGEST shown, focusable, non-bar descendant. "First focusable" is wrong for an
+// application frame full of panes (the first hit is some pane's search box); the main
+// work area — a canvas — is by construction the biggest child, which is also what a
+// user expects to be typing into.
+static wxWindowWasm *wxWasmBestFocusableChild(wxWindow *parent, long &bestArea)
+{
+    wxWindowWasm *best = NULL;
+    for (wxWindowList::compatibility_iterator node = parent->GetChildren().GetFirst();
+         node; node = node->GetNext())
+    {
+        wxWindow *child = node->GetData();
+        if (!child->IsShown() || child->IsTopLevel() || child->IsBeingDeleted() ||
+            wxWasmIsBarWindow(child))
+            continue;
+        if (child->CanAcceptFocus() && child->IsShownOnScreen())
+        {
+            wxSize sz = child->GetSize();
+            long area = (long)sz.x * (long)sz.y;
+            if (area > bestArea)
+            {
+                bestArea = area;
+                best = static_cast<wxWindowWasm *>(child);
+            }
+        }
+        if (wxWindowWasm *deep = wxWasmBestFocusableChild(child, bestArea))
+            best = deep;
+    }
+    return best;
+}
+
+static wxWindowWasm *wxWasmFirstFocusableChild(wxWindow *parent)
+{
+    long bestArea = 0;
+    return wxWasmBestFocusableChild(parent, bestArea);
+}
 static wxWindowWasm *gs_nextFocusWindow = NULL;
+
+// ----------------------------------------------------------------------------
+// Transient popup dismissal
+// ----------------------------------------------------------------------------
+//
+// wxPopupTransientWindow's generic dismissal (src/common/popupcmn.cpp) pushes
+// wxPopupFocusHandler on the ONE window Popup() focused and relies on a
+// pointer grab (GTK) / activation (MSW) for clicks outside. Neither exists
+// here, and when the popup's content is a wxPanel (wxComboCtrl popups such as
+// KiCad's FILTER_COMBOPOPUP) wxControlContainer delegates that SetFocus to a
+// child, so the handler's window never held focus and an outside click left
+// the dropdown open. The port implements the rule itself: a button press or a
+// focus move to a window outside a shown transient popup dismisses it, and the
+// press is then delivered normally (a grab-dismissed click is reposted to the
+// window beneath on the native ports too).
+
+static wxPopupTransientWindow *wxWasmTransientPopupOf(wxWindow *window)
+{
+    for (wxWindow *w = window; w != NULL; w = w->GetParent())
+    {
+        if (wxPopupTransientWindow *popup = wxDynamicCast(w, wxPopupTransientWindow))
+            return popup;
+        if (w->IsTopLevel())
+            break;
+    }
+    return NULL;
+}
+
+bool wxWasmIsInsideShownTransientPopup(wxWindow *window)
+{
+    wxPopupTransientWindow *popup = wxWasmTransientPopupOf(window);
+    return popup != NULL && popup->IsShown();
+}
+
+void wxWasmDismissTransientPopupsOutside(wxWindow *target)
+{
+    // Collect first: DismissAndNotify() re-enters SetFocus() (wxComboCtrl
+    // refocuses itself on dismiss) and may reorder wxTopLevelWindows.
+    std::vector<wxPopupTransientWindow *> shown;
+    for (wxWindowList::const_iterator it = wxTopLevelWindows.begin();
+         it != wxTopLevelWindows.end(); ++it)
+    {
+        wxPopupTransientWindow *popup = wxDynamicCast(*it, wxPopupTransientWindow);
+        if (popup != NULL && popup->IsShown())
+            shown.push_back(popup);
+    }
+
+    for (size_t i = 0; i < shown.size(); ++i)
+    {
+        wxPopupTransientWindow *popup = shown[i];
+        bool inside = false;
+        for (wxWindow *w = target; w != NULL; w = w->GetParent())
+        {
+            if (w == popup)
+            {
+                inside = true;
+                break;
+            }
+        }
+
+        if (!inside && popup->IsShown())
+            popup->DismissAndNotify();
+    }
+}
 static wxWindowWasm *gs_captureWindow = NULL;
 
 // ----------------------------------------------------------------------------
@@ -106,6 +245,12 @@ static void UpdateElementRegistry(wxWindowWasm* window, bool isNew)
         parentId = reinterpret_cast<uintptr_t>(window->GetParent());
     }
 
+    // The owning top-level window (frame/dialog). Plain container panels are
+    // never registered (see isBaseClassType above), so parentId chains break
+    // at the first panel; this lets the page ask "is this control inside that
+    // dialog?" directly (guide overlay, overlay-system 0002 M3).
+    uintptr_t topLevelId = reinterpret_cast<uintptr_t>(wxGetTopLevelParent(window));
+
     // Call the appropriate JavaScript helper function (defined in wx.js)
     if (isNew) {
         EM_ASM({
@@ -117,7 +262,8 @@ static void UpdateElementRegistry(wxWindowWasm* window, bool isNew)
                 $4, $5, $6, $7,
                 $8 ? $8.toString() : null,
                 $9 ? true : false,
-                $10 ? true : false
+                $10 ? true : false,
+                $11 ? $11.toString() : null
             );
         },
         id,
@@ -128,7 +274,8 @@ static void UpdateElementRegistry(wxWindowWasm* window, bool isNew)
         size.GetWidth(), size.GetHeight(),
         parentId,
         visible ? 1 : 0,
-        enabled ? 1 : 0);
+        enabled ? 1 : 0,
+        topLevelId);
     } else {
         EM_ASM({
             wxElementUpdate(
@@ -139,7 +286,8 @@ static void UpdateElementRegistry(wxWindowWasm* window, bool isNew)
                 $4, $5, $6, $7,
                 $8 ? $8.toString() : null,
                 $9 ? true : false,
-                $10 ? true : false
+                $10 ? true : false,
+                $11 ? $11.toString() : null
             );
         },
         id,
@@ -150,7 +298,31 @@ static void UpdateElementRegistry(wxWindowWasm* window, bool isNew)
         size.GetWidth(), size.GetHeight(),
         parentId,
         visible ? 1 : 0,
-        enabled ? 1 : 0);
+        enabled ? 1 : 0,
+        topLevelId);
+    }
+}
+
+// Re-report a window and every descendant: their screen positions all shift
+// when an ancestor moves, but only the moved window gets DoMoveWindow — the
+// registry kept the descendants' old coordinates (a dragged dialog's controls
+// stayed where the dialog used to be). Iterates snapshots of the child lists,
+// like UpdateChildrenDOMVisibility, and only touches registry entries.
+static void UpdateElementRegistryTree(wxWindowWasm* window)
+{
+    if (!window) return;
+
+    UpdateElementRegistry(window, false);
+
+    wxWindowList& children = window->GetChildren();
+    std::vector<wxWindow*> snapshot(children.begin(), children.end());
+
+    for (wxWindow* child : snapshot)
+    {
+        // Top-level children (dialogs parented to a frame) keep their own
+        // screen position when the parent moves.
+        if (child && !child->IsTopLevel())
+            UpdateElementRegistryTree(dynamic_cast<wxWindowWasm*>(child));
     }
 }
 
@@ -224,6 +396,16 @@ wxWindowWasm::~wxWindowWasm()
     if (gs_focusWindow == this)
     {
         gs_focusWindow = NULL;
+    }
+    // P-4: forget this window as a top-level's last-focused child, and its own record.
+    gs_lastFocusedChild.erase(this);
+    for (std::map<wxWindowWasm *, wxWindowWasm *>::iterator it = gs_lastFocusedChild.begin();
+         it != gs_lastFocusedChild.end(); )
+    {
+        if (it->second == this)
+            it = gs_lastFocusedChild.erase(it);
+        else
+            ++it;
     }
 #if wxUSE_TOOLTIPS
     // Drop the hovered-window pointer too, so a pending tooltip timer can't
@@ -437,10 +619,36 @@ void wxWindowWasm::UpdateDomVisibility()
     }
 }
 
+bool wxWindowWasm::WasmSendDomCharHook(int keyCode)
+{
+    wxKeyEvent hook(wxEVT_CHAR_HOOK);
+    hook.m_keyCode = keyCode;
+    hook.SetEventObject(this);
+    hook.SetId(GetId());
+    // wxEVT_CHAR_HOOK propagates to parents by construction (wxKeyEvent::
+    // InitPropagation), so a hook bound on a container (KiCad LIB_TREE on its
+    // wxSearchCtrl) sees a key typed into the inner DOM <input>.
+    const bool handled = HandleWindowEvent(hook);
+    return handled && !hook.IsNextEventAllowed();
+}
+
 void wxWindowWasm::OnDomEvent(wxDomEventKind kind)
 {
     switch ( kind )
     {
+        case wxDOM_EVENT_KEY_UP:
+            WasmSendDomCharHook(WXK_UP);
+            break;
+        case wxDOM_EVENT_KEY_DOWN:
+            WasmSendDomCharHook(WXK_DOWN);
+            break;
+        case wxDOM_EVENT_KEY_PAGEUP:
+            WasmSendDomCharHook(WXK_PAGEUP);
+            break;
+        case wxDOM_EVENT_KEY_PAGEDOWN:
+            WasmSendDomCharHook(WXK_PAGEDOWN);
+            break;
+
         case wxDOM_EVENT_FOCUSIN:
             // Keep the wx focus model truthful when the browser moves focus.
             if ( gs_focusWindow != this && CanAcceptFocus() )
@@ -713,23 +921,27 @@ void wxWindowWasm::DestroyScrollbarDom()
 
 #if wxUSE_MENUS
 
-// Shows the DOM context menu and BLOCKS (pumping wx events) until an item is
-// chosen or the menu is dismissed, returning the chosen command id (-1 =
-// cancelled). The whole modal lifetime lives in JS (Module.wxShowContextMenu),
-// mirroring wxDialog::ShowModal's startModal: no C++ object's destructor needs
-// to survive the Asyncify suspension (which is unreliable here).
+// Shows the DOM context menu and BLOCKS until an item is chosen or the menu
+// is dismissed, returning the chosen command id (-1 = cancelled). The whole
+// modal lifetime lives in JS (Module.wxShowContextMenu), mirroring
+// wxDialog::ShowModal: the C++ side is a single suspended frame with no
+// per-popup pump — the top-level tick dispatches while this chain is
+// suspended (doc 17 S4). Route the menu promise through the shim's
+// shadow-stack discipline (jspi-scheduler.js promiseYield; emscripten
+// #27364).
 EM_ASYNC_JS(int, wxDomPopupMenuModal,
             (const char *json, int invokerDomId, int x, int y), {
-    return await Module['wxShowContextMenu'](UTF8ToString(json),
-                                             invokerDomId, x, y);
+    return await globalThis.__wxScheduler.promiseYield(
+        Module['wxShowContextMenu'](UTF8ToString(json), invokerDomId, x, y),
+        'popup');
 });
 
 bool wxWindowWasm::DoPopupMenu(wxMenu *menu, int x, int y)
 {
     wxCHECK_MSG(menu, false, wxT("DoPopupMenu: NULL menu"));
 
-    // Build the JSON before suspending: no wxString may need to outlive the
-    // Asyncify park (destructors don't reliably run across it).
+    // Build the JSON up front; the suspended frame keeps it alive for the
+    // menu's whole lifetime.
     const wxString json = menu->WasmItemsToJson();
 
     // x/y are client coords of this window, OR wxDefaultCoord meaning "at the
@@ -737,8 +949,16 @@ bool wxWindowWasm::DoPopupMenu(wxMenu *menu, int x, int y)
     const int vx = (x == wxDefaultCoord) ? -1 : x;
     const int vy = (y == wxDefaultCoord) ? -1 : y;
 
+    // The invoking dispatch chain suspends for the menu's whole lifetime;
+    // event dispatch must keep running meanwhile (the menu itself and the
+    // rest of the UI), so zero the dispatch interlock for that whole span
+    // (manual save/restore: wxWasmDispatchRestore centralizes the
+    // erased-guard reporting).
+    const int savedDispatchDepth = wxWasmDispatchDepth;
+    wxWasmDispatchDepth = 0;
     const int chosenId =
         wxDomPopupMenuModal(json.utf8_str(), WasmGetDomId(), vx, vy);
+    wxWasmDispatchRestore(savedDispatchDepth, "PopupMenu");
 
     if ( chosenId < 0 )
         return false; // cancelled
@@ -906,10 +1126,23 @@ bool wxWindowWasm::Show(bool show)
 
 void wxWindowWasm::UpdateChildrenDOMVisibility()
 {
+    // Iterate a SNAPSHOT of the child list, never the live list: a child's
+    // Show() override may reorder its parent's children while this walk is
+    // stepping through them. KiCad's WEBGL_GAL::Show() calls Raise(), which
+    // (below) deletes the child's own list node and appends a fresh one, so a
+    // live iterator would advance through a freed node — a use-after-free that
+    // surfaces as "memory access out of bounds" in this recursion whenever the
+    // freed node's memory has been reused (heap-layout dependent: observed only
+    // under some browser locales / builds, in SCH_EDIT_FRAME's ctor via
+    // wxAuiManager::Update on the design-block preview canvas).
     wxWindowList& children = GetChildren();
+    std::vector<wxWindow*> snapshot;
+    snapshot.reserve(children.GetCount());
     for (wxWindowList::iterator i = children.begin(); i != children.end(); ++i)
+        snapshot.push_back(*i);
+
+    for (wxWindow *child : snapshot)
     {
-        wxWindow *child = *i;
         if (child)
         {
             // Call Show() on child with its current state to trigger any
@@ -933,8 +1166,62 @@ void wxWindowWasm::UpdateChildrenDOMVisibility()
 
 void wxWindowWasm::SetFocus()
 {
+    // P-4: focusing a top-level window means focusing one of its children — the one that
+    // last had focus, else the largest focusable one (wxWasmBestFocusableChild). Only when
+    // it has no focusable child at all does the frame itself take focus (the pre-fix
+    // behaviour). Checked BEFORE the
+    // accept-focus bail-out: whether or not the frame itself may hold focus, a
+    // `frame->SetFocus()` must still land on its child.
+    //
+    // Real frames/dialogs only: wxPopupWindow also reports IsTopLevel(), but a
+    // transient popup takes focus ITSELF on Popup() and dismisses on its own
+    // kill-focus (wxPopupFocusHandler) — delegating its SetFocus to a child left
+    // the popup never focused and so never dismissed on an outside click
+    // (e2e/popup.spec.ts "dismisses on outside click", regression of the P-4 fix).
+    if ( IsTopLevel() && IsEnabled() && !wxDynamicCast(this, wxPopupWindow) )
+    {
+        wxWindowWasm *target = NULL;
+        std::map<wxWindowWasm *, wxWindowWasm *>::iterator it = gs_lastFocusedChild.find(this);
+        // IsShownOnScreen, not IsShown: a control inside a collapsed/hidden pane still
+        // reports IsShown() — the search pane's text box took focus at boot and would
+        // otherwise be "restored" forever.
+        if ( it != gs_lastFocusedChild.end() && it->second->IsShownOnScreen() &&
+             !it->second->IsBeingDeleted() && it->second->CanAcceptFocus() &&
+             !wxWasmIsBarWindow(it->second) )
+            target = it->second;
+        else
+            target = wxWasmFirstFocusableChild(this);
+
+        if ( target && target != this )
+        {
+            target->SetFocus();
+            return;
+        }
+    }
+
     if ( gs_focusWindow == this || !CanAcceptFocus() )
         return; // nothing to do, focused already
+
+    // Focus leaving a shown transient popup dismisses it (see the helper
+    // above). Dismissal can re-enter SetFocus(), so re-check afterwards.
+    if ( gs_focusWindow != NULL && wxWasmIsInsideShownTransientPopup(gs_focusWindow) )
+    {
+        wxWasmDismissTransientPopupsOutside(this);
+
+        if ( gs_focusWindow == this )
+            return;
+    }
+
+    if ( !IsTopLevel() && !wxWasmIsBarWindow(this) )
+    {
+        if ( wxWindowWasm *tlw = wxWasmTopLevelOf(this) )
+        {
+            if ( tlw != this )
+            {
+                gs_lastFocusedChild[tlw] = this;
+            }
+        }
+    }
 
     wxWindowWasm *prevFocusWindow = gs_focusWindow;
 
@@ -962,9 +1249,15 @@ void wxWindowWasm::SetFocus()
         caret->OnSetFocus();
 #endif // wxUSE_CARET
 
-    // Keep browser focus in sync (no-op if the element already has it).
+    // Keep browser focus in sync (no-op if the element already has it). A
+    // canvas-drawn window taking wx focus must also take BROWSER focus away
+    // from whichever wx-dom control had it: the mouse callback preventDefaults
+    // mousedown, so the browser never moves focus off a DOM <input> on its
+    // own, and the keyboard callback would keep routing keys to that input.
     if (m_domId)
         wxDomFocus(m_domId);
+    else
+        wxDomBlurActive();
 }
 
 void wxWindowWasm::KillFocus()
@@ -1022,16 +1315,24 @@ bool wxWindowWasm::HasTransparentBackground()
 
 void wxWindowWasm::Invalidate(bool needsPaint)
 {
-    if (!m_childNeedsPaint || m_selfNeedsPaint != needsPaint)
-    {
-        m_selfNeedsPaint |= needsPaint;
-        m_childNeedsPaint = true;
+    m_selfNeedsPaint |= needsPaint;
+    m_childNeedsPaint = true;
 
-        if (GetParent())
-        {
-            bool parentNeedsPaint = needsPaint && HasTransparentBackground();
-            GetParent()->Invalidate(parentNeedsPaint);
-        }
+    // Always walk up to the top-level window, even when this window's flags
+    // are already set. An early-out here (skip the walk if m_childNeedsPaint
+    // is already true) assumes "descendant flagged => ancestor chain flagged",
+    // but the paint sweep breaks that invariant: DoPaint() clears a window's
+    // flags on entry while a flagged child can be skipped (hidden/frozen/
+    // zero-sized), stranding the child with flags set and its ancestor chain
+    // clear. A window stuck like that had every later Refresh() swallowed by
+    // the early-out, so wxApp::Paint() (gated on the top-level's
+    // NeedsPaint()) never descended to it again. This permanently blanked
+    // the GAL canvas when the repaint it dropped was a lost-WebGL-context
+    // recovery (SwiftShader CI: the occ-export blank-board flake).
+    if (GetParent())
+    {
+        bool parentNeedsPaint = needsPaint && HasTransparentBackground();
+        GetParent()->Invalidate(parentNeedsPaint);
     }
 }
 
@@ -1075,8 +1376,6 @@ void wxWindowWasm::PaintSelf()
 
     wxPaintEvent paintEvent(this);
     HandleWindowEvent(paintEvent);
-
-    m_selfNeedsPaint = false;
 }
 
 void wxWindowWasm::PaintChildren(bool selfWasPainted)
@@ -1098,8 +1397,6 @@ void wxWindowWasm::PaintChildren(bool selfWasPainted)
             }
         }
     }
-
-    m_childNeedsPaint = false;
 }
 
 void wxWindowWasm::DoPaint(bool parentWasPainted)
@@ -1117,20 +1414,24 @@ void wxWindowWasm::DoPaint(bool parentWasPainted)
     {
         m_updateRegion = wxRect(GetSize());
 
-        bool selfWasPainted;
-        if (m_selfNeedsPaint || parentWasPainted)
+        bool selfWasPainted = m_selfNeedsPaint || parentWasPainted;
+
+        // Clear both flags BEFORE dispatching any paint event, not after the
+        // sweep: paint handlers can call Refresh()/Invalidate() reentrantly
+        // (widget churn during a paint, a canvas re-created mid-frame), and a
+        // post-sweep clear would silently swallow that request — with nothing
+        // ever re-issuing it, the window stays stale forever. Cleared up
+        // front, a mid-paint Invalidate re-arms the flags and the next pump
+        // frame repaints.
+        m_selfNeedsPaint = false;
+        m_childNeedsPaint = false;
+
+        if (selfWasPainted)
         {
             PaintSelf();
-            selfWasPainted = true;
-        }
-        else
-        {
-            selfWasPainted = false;
         }
 
-        //if (m_childNeedsPaint || selfWasPainted) {
         PaintChildren(selfWasPainted);
-        //}
 
         m_updateRegion.Clear();
     }
@@ -1399,6 +1700,7 @@ void wxWindowWasm::DoMoveWindow(int x, int y, int width, int height)
 
     if (m_x != clientX || m_y != clientY || m_width != width || m_height != height)
     {
+        const bool originMoved = m_x != clientX || m_y != clientY;
         wxRect oldPos = wxRect(m_x, m_y, m_width, m_height);
         oldPos.Offset(parentOrigin);
 
@@ -1417,8 +1719,12 @@ void wxWindowWasm::DoMoveWindow(int x, int y, int width, int height)
             parent->RefreshRect(newPos);
         }
 
-        // Update element position in JS registry
-        UpdateElementRegistry(this, false);
+        // Update element position in JS registry — the whole subtree when
+        // the origin moved, since every descendant's screen position did too.
+        if (originMoved)
+            UpdateElementRegistryTree(this);
+        else
+            UpdateElementRegistry(this, false);
 
         UpdateDomGeometry();
     }

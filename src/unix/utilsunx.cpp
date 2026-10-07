@@ -18,6 +18,10 @@
 // for compilers that support precompilation, includes "wx.h".
 #include "wx/wxprec.h"
 
+// Define this as soon as possible and before string.h is included to get
+// memset_s() declaration from it if available.
+#define __STDC_WANT_LIB_EXT1__ 1
+
 #include "wx/utils.h"
 
 #if !defined(HAVE_SETENV) && defined(HAVE_PUTENV)
@@ -900,10 +904,11 @@ long wxExecute(const char* const* argv, int flags, wxProcess* process,
 const wxChar* wxGetHomeDir( wxString *home  )
 {
     *home = wxGetUserHome();
+    wxString tmp;
     if ( home->empty() )
         *home = wxT("/");
 #ifdef __VMS
-    wxString tmp = *home;
+    tmp = *home;
     if ( tmp.Last() != wxT(']'))
         if ( tmp.Last() != wxT('/')) *home << wxT('/');
 #endif

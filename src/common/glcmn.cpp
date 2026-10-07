@@ -310,7 +310,7 @@ bool wxGLCanvasBase::ParseAttribList(const int *attribList,
                 src++;
                 break;
 
-            case WX_GL_COMPAT_PROFILE:
+            case wx_GL_COMPAT_PROFILE:
                 if ( ctxAttrs )
                     ctxAttrs->CompatibilityProfile();
                 break;

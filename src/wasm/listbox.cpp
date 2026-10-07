@@ -199,9 +199,16 @@ void wxListBox::DoSetFirstItem(int WXUNUSED(n))
 
 int wxListBox::DoListHitTest(const wxPoint& point) const
 {
-    return WasmGetDomId()
-            ? wxDomListHitTest(WasmGetDomId(), point.x, point.y)
-            : wxNOT_FOUND;
+    // Ask the DOM for the row under the point: the browser lays the rows
+    // out (and scrolls them), so its geometry is the truth. Callers such
+    // as KiCad's FILTER_COMBOPOPUP (net/footprint/symbol filter dropdowns)
+    // select-and-accept the row from wxEVT_LEFT_DOWN + HitTest, exactly as
+    // on the native ports.
+    if (!WasmGetDomId())
+        return wxNOT_FOUND;
+
+    const int n = wxDomListHitTest(WasmGetDomId(), point.x, point.y);
+    return (n >= 0 && n < static_cast<int>(GetCount())) ? n : wxNOT_FOUND;
 }
 
 void wxListBox::DoSetSelection(int n, bool select)
@@ -305,6 +312,22 @@ void wxListBox::OnDomEvent(wxDomEventKind kind)
         const int sel = selections.empty() ? wxNOT_FOUND : selections[0];
 
         wxCommandEvent event(wxEVT_LISTBOX, GetId());
+        event.SetInt(sel);
+        if (sel != wxNOT_FOUND)
+            event.SetString(GetString(sel));
+        event.SetEventObject(this);
+        HandleWindowEvent(event);
+        return;
+    }
+
+    if (kind == wxDOM_EVENT_DBLCLICK)
+    {
+        // Row double-clicked in the browser: wxEVT_LISTBOX_DCLICK for the
+        // current selection, like the native ports (KiCad's filter popups
+        // treat it as "accept", and on GTK Enter arrives this way too).
+        const int sel = GetSelection();
+
+        wxCommandEvent event(wxEVT_LISTBOX_DCLICK, GetId());
         event.SetInt(sel);
         if (sel != wxNOT_FOUND)
             event.SetString(GetString(sel));

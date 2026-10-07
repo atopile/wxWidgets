@@ -77,12 +77,10 @@ void wxTextCtrl::DiscardEdits()
 
 void wxTextCtrl::WriteText(const wxString& text)
 {
+    // The base mixin pushes both the new value and the caret position into
+    // the DOM element (pushing the value again here would reset the DOM
+    // caret to the end, undoing the caret push).
     wxTextEntry::WriteText(text);
-
-    // WriteText/AppendText mutate the cache directly (not via DoSetValue),
-    // so push the result into the DOM element here.
-    if (WasmGetDomId())
-        wxDomSetValue(WasmGetDomId(), GetValue());
 
     MarkDirty();
 }
@@ -120,6 +118,12 @@ void wxTextCtrl::OnDomEvent(wxDomEventKind kind)
         }
 
         case wxDOM_EVENT_ENTER:
+            // Native ordering: wxEVT_CHAR_HOOK first (a consuming handler —
+            // KiCad LIB_TREE's Enter-confirms — suppresses everything
+            // after it), then the control's own wxEVT_TEXT_ENTER.
+            if (WasmSendDomCharHook(WXK_RETURN))
+                return;
+
             if (GetWindowStyle() & wxTE_PROCESS_ENTER)
             {
                 wxCommandEvent event(wxEVT_TEXT_ENTER, GetId());

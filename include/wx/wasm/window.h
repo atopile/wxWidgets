@@ -26,7 +26,17 @@ enum wxDomEventKind
     wxDOM_EVENT_MENU = 9,
     wxDOM_EVENT_TOOL = 10,
     wxDOM_EVENT_TAB = 11,
-    wxDOM_EVENT_SCROLL = 12
+    wxDOM_EVENT_SCROLL = 12,
+    // Navigation keys typed into a DOM editable (findings O-2): the browser
+    // owns typing, but wx code binds wxEVT_CHAR_HOOK for Enter/arrows on
+    // filter boxes (KiCad LIB_TREE) — these carry that hook across.
+    wxDOM_EVENT_KEY_UP = 13,
+    wxDOM_EVENT_KEY_DOWN = 14,
+    wxDOM_EVENT_KEY_PAGEUP = 15,
+    wxDOM_EVENT_KEY_PAGEDOWN = 16,
+    // Double-click on a DOM listbox row -> wxEVT_LISTBOX_DCLICK (native
+    // ports fire it; KiCad's filter popups bind it as "accept").
+    wxDOM_EVENT_DBLCLICK = 17
 };
 
 class WXDLLIMPEXP_CORE wxWindowWasm : public wxWindowBase
@@ -105,7 +115,21 @@ public:
     // DOM events (click/input/focus...) routed here by src/wasm/domevents.cpp.
     virtual void OnDomEvent(wxDomEventKind kind);
 
-    virtual WXWidget GetHandle() const wxOVERRIDE { return NULL; }
+    // Synthesize wxEVT_CHAR_HOOK for a key the DOM editable already
+    // processed (Enter / arrows). Returns true when a handler consumed it
+    // (handled and did not DoAllowNextEvent()), i.e. the control-level
+    // follow-up (wxEVT_TEXT_ENTER) must be suppressed like on native ports.
+    bool WasmSendDomCharHook(int keyCode);
+
+    // There is no native handle in this port, but common code uses
+    // GetHandle() as an "is the window created?" probe (wxComboCtrlBase::
+    // PositionTextCtrl bails on NULL and left combo text ctrls at their
+    // 10px creation size; wxWindowBase::Destroy, wxTopLevelWindowBase::
+    // Destroy). Hand out an opaque non-null token once Create() completed.
+    virtual WXWidget GetHandle() const wxOVERRIDE
+    {
+        return m_isCreated ? const_cast<wxWindowWasm *>(this) : NULL;
+    }
 
     virtual bool HasTransparentBackground() wxOVERRIDE;
 
@@ -227,5 +251,16 @@ private:
 };
 
 extern wxWindow *g_mouseWindow;
+
+// Transient popups (wxPopupTransientWindow: combo dropdowns, toolbar
+// palettes) dismiss on a button press or a focus move outside them. Native
+// ports get that from a pointer grab (GTK) or window activation (MSW); this
+// port applies the rule directly from the mouse pipeline and SetFocus().
+// Dismisses (with notification) every shown transient popup that does not
+// contain `target` (NULL = nothing under the pointer).
+void wxWasmDismissTransientPopupsOutside(wxWindow *target);
+
+// True when `window` lives inside a shown wxPopupTransientWindow.
+bool wxWasmIsInsideShownTransientPopup(wxWindow *window);
 
 #endif // __WX_WASM_WINDOW_H__

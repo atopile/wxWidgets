@@ -21,8 +21,10 @@
 #include <emscripten.h>
 #include <string.h>
 
+#include "wx/wasm/private/yieldwait.h"
+
 //-----------------------------------------------------------------------------
-// JavaScript helper functions using Asyncify
+// JavaScript helper functions using scheduler token waits
 //-----------------------------------------------------------------------------
 
 // Check if the browser Clipboard API is available
@@ -32,76 +34,79 @@ EM_JS(bool, js_isClipboardAPIAvailable, (), {
            typeof navigator.clipboard.writeText === 'function';
 });
 
-// Helper to create a timeout promise
-// Write text to clipboard using Asyncify
-// Returns: 0 = success, 1 = no API, 2 = permission denied, 3 = other error, 4 = timeout
-EM_ASYNC_JS(int, js_writeTextToClipboard, (const char* text), {
+// W4 quartet (docs/features/async/22 §5): each clipboard op opens a wait
+// token, starts the JS request, and suspends via wxWasmYieldUntil. Every
+// resolution defers to at least a microtask (the early-resolve contract).
+
+// Write text to clipboard.
+// Wait result: 0 = success, 1 = no API, 2 = permission denied, 3 = other error, 4 = timeout
+EM_JS(void, js_writeTextToClipboardStart, (int token, const char* text), {
+    const finish = (v) => globalThis.__wxScheduler.resolveWait(token, v);
+
     if (typeof navigator === 'undefined' ||
         typeof navigator.clipboard === 'undefined') {
         console.warn('[wxClipboard] Clipboard API not available');
-        return 1;
+        Promise.resolve().then(() => finish(1));
+        return;
     }
 
-    try {
-        const textStr = UTF8ToString(text);
+    const textStr = UTF8ToString(text);
 
-        // Add timeout to prevent hanging - clipboard should be fast
-        const timeoutMs = 2000;
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('Clipboard operation timed out')), timeoutMs);
-        });
+    // Add timeout to prevent hanging - clipboard should be fast
+    const timeoutMs = 2000;
+    const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Clipboard operation timed out')), timeoutMs);
+    });
 
-        await Promise.race([
-            navigator.clipboard.writeText(textStr),
-            timeoutPromise
-        ]);
-
-        return 0;
-    } catch (err) {
+    Promise.race([
+        navigator.clipboard.writeText(textStr),
+        timeoutPromise
+    ]).then(() => finish(0)).catch((err) => {
         if (err.name === 'NotAllowedError') {
             console.warn('[wxClipboard] Clipboard write permission denied: ' + err.message);
-            return 2;
+            return finish(2);
         }
         if (err.message && err.message.includes('timed out')) {
             console.warn('[wxClipboard] Clipboard write timed out');
-            return 4;
+            return finish(4);
         }
         console.error('[wxClipboard] Clipboard write error: ' + err.message);
-        return 3;
-    }
+        finish(3);
+    });
 });
 
-// Read text from clipboard using Asyncify
-// Returns the text or NULL on failure. Caller must free with free().
-EM_ASYNC_JS(char*, js_readTextFromClipboard, (), {
+// Read text from clipboard.
+// Wait result: malloc'd text pointer, or 0 on failure (caller frees).
+EM_JS(void, js_readTextFromClipboardStart, (int token), {
+    const finish = (v) => globalThis.__wxScheduler.resolveWait(token, v);
+
     if (typeof navigator === 'undefined' ||
         typeof navigator.clipboard === 'undefined') {
         console.warn('[wxClipboard] Clipboard API not available');
-        return 0;  // NULL
+        Promise.resolve().then(() => finish(0));
+        return;
     }
 
-    try {
-        // Add timeout to prevent hanging
-        const timeoutMs = 2000;
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('Clipboard operation timed out')), timeoutMs);
-        });
+    // Add timeout to prevent hanging
+    const timeoutMs = 2000;
+    const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Clipboard operation timed out')), timeoutMs);
+    });
 
-        const text = await Promise.race([
-            navigator.clipboard.readText(),
-            timeoutPromise
-        ]);
-
+    Promise.race([
+        navigator.clipboard.readText(),
+        timeoutPromise
+    ]).then((text) => {
         // Allocate memory for the string and copy it
         const len = lengthBytesUTF8(text) + 1;
         const ptr = _malloc(len);
         if (ptr === 0) {
             console.error('[wxClipboard] Failed to allocate memory for clipboard text');
-            return 0;
+            return finish(0);
         }
         stringToUTF8(text, ptr, len);
-        return ptr;
-    } catch (err) {
+        finish(ptr);
+    }).catch((err) => {
         if (err.name === 'NotAllowedError') {
             console.warn('[wxClipboard] Clipboard read permission denied: ' + err.message);
         } else if (err.message && err.message.includes('timed out')) {
@@ -109,64 +114,110 @@ EM_ASYNC_JS(char*, js_readTextFromClipboard, (), {
         } else {
             console.error('[wxClipboard] Clipboard read error: ' + err.message);
         }
-        return 0;  // NULL
-    }
+        finish(0);
+    });
 });
 
-// Check if clipboard has text content using Asyncify
-// Returns: 0 = no text, 1 = has text, -1 = error/unavailable
-// NOTE: deliberately NOT called from IsSupported() — this suspends for up
+// Check if clipboard has text content.
+// Wait result: 0 = no text, 1 = has text, -1 = error/unavailable
+// NOTE: deliberately NOT called from IsSupported() — this waits for up
 // to 2 s and must never run on the idle path (see IsSupported below).
-EM_ASYNC_JS(int, js_clipboardHasText, (), {
+EM_JS(void, js_clipboardHasTextStart, (int token), {
+    const finish = (v) => globalThis.__wxScheduler.resolveWait(token, v);
+
     if (typeof navigator === 'undefined' ||
         typeof navigator.clipboard === 'undefined') {
-        return -1;
+        Promise.resolve().then(() => finish(-1));
+        return;
     }
 
-    try {
-        // Add timeout to prevent hanging
-        const timeoutMs = 2000;
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('Clipboard operation timed out')), timeoutMs);
-        });
+    // Add timeout to prevent hanging
+    const timeoutMs = 2000;
+    const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Clipboard operation timed out')), timeoutMs);
+    });
 
-        // Try to read to check availability
-        const text = await Promise.race([
-            navigator.clipboard.readText(),
-            timeoutPromise
-        ]);
-        return (text && text.length > 0) ? 1 : 0;
-    } catch (err) {
+    // Try to read to check availability
+    Promise.race([
+        navigator.clipboard.readText(),
+        timeoutPromise
+    ]).then((text) => {
+        finish((text && text.length > 0) ? 1 : 0);
+    }).catch((err) => {
         // Permission denied or other error - we can't determine
         console.warn('[wxClipboard] Cannot check clipboard content: ' + err.message);
-        return -1;
-    }
+        finish(-1);
+    });
 });
 
 // Clear the clipboard by writing empty text
-EM_ASYNC_JS(int, js_clearClipboard, (), {
+EM_JS(void, js_clearClipboardStart, (int token), {
+    const finish = (v) => globalThis.__wxScheduler.resolveWait(token, v);
+
     if (typeof navigator === 'undefined' ||
         typeof navigator.clipboard === 'undefined') {
-        return 1;
+        Promise.resolve().then(() => finish(1));
+        return;
     }
 
-    try {
-        // Add timeout to prevent hanging
-        const timeoutMs = 2000;
-        const timeoutPromise = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('Clipboard operation timed out')), timeoutMs);
-        });
+    // Add timeout to prevent hanging
+    const timeoutMs = 2000;
+    const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Clipboard operation timed out')), timeoutMs);
+    });
 
-        await Promise.race([
-            navigator.clipboard.writeText(''),
-            timeoutPromise
-        ]);
-        return 0;
-    } catch (err) {
+    Promise.race([
+        navigator.clipboard.writeText(''),
+        timeoutPromise
+    ]).then(() => finish(0)).catch((err) => {
         console.warn('[wxClipboard] Failed to clear clipboard: ' + err.message);
-        return 1;
-    }
+        finish(1);
+    });
 });
+
+// The synchronous faces the wxClipboard methods below keep calling; each is
+// now a token wait over its Start() half above. Token 0 = the scheduler
+// refused the wait (dead or terminal instance): return each face's FAILURE
+// shape — the fabricated instant-0 result used to read as SUCCESS for
+// write/clear.
+static int wxClipboardWriteText(const char* text)
+{
+    const int token = wxWasmBeginWait("clipboard");
+    if (token <= 0)
+        return 3; // other error — callers fall back to the local cache
+    js_writeTextToClipboardStart(token, text);
+    return wxWasmYieldUntil(token);
+}
+
+static char* wxClipboardReadText()
+{
+    const int token = wxWasmBeginWait("clipboard");
+    if (token <= 0)
+        return nullptr;
+    js_readTextFromClipboardStart(token);
+    // The malloc'd pointer rides the wait as an int32.
+    return (char*) (uintptr_t) (uint32_t) wxWasmYieldUntil(token);
+}
+
+// Unused today exactly like its predecessor (see the IsSupported comment
+// below) — kept as the sanctioned entry point should a caller appear.
+[[maybe_unused]] static int wxClipboardHasText()
+{
+    const int token = wxWasmBeginWait("clipboard");
+    if (token <= 0)
+        return -1; // error
+    js_clipboardHasTextStart(token);
+    return wxWasmYieldUntil(token);
+}
+
+static int wxClipboardClear()
+{
+    const int token = wxWasmBeginWait("clipboard");
+    if (token <= 0)
+        return 1; // failure
+    js_clearClipboardStart(token);
+    return wxWasmYieldUntil(token);
+}
 
 //-----------------------------------------------------------------------------
 // wxClipboard implementation
@@ -208,8 +259,11 @@ bool wxClipboard::IsOpened() const
 
 bool wxClipboard::SetData(wxDataObject *data)
 {
-    // SetData clears existing data and sets new data
-    Clear();
+    // AddData overwrites the browser clipboard anyway; a browser Clear()
+    // here would cost an extra JSPI round-trip (up to 2 s) per copy and
+    // leave the clipboard EMPTY when the subsequent write fails. Only the
+    // local cache needs dropping.
+    m_textCache.Clear();
     return AddData(data);
 }
 
@@ -258,7 +312,7 @@ bool wxClipboard::AddData(wxDataObject *data)
         if (js_isClipboardAPIAvailable())
         {
             const wxScopedCharBuffer utf8 = m_textCache.utf8_str();
-            int result = js_writeTextToClipboard(utf8.data());
+            int result = wxClipboardWriteText(utf8.data());
 
             if (result == 0)
             {
@@ -300,12 +354,12 @@ bool wxClipboard::IsSupported(const wxDataFormat& format)
 
         // IsSupported is a synchronous-by-contract predicate that UI-update /
         // paste-enable paths call repeatedly. It must NOT call
-        // js_clipboardHasText(): that EM_ASYNC_JS parks the stack for up to
-        // 2 s awaiting navigator.clipboard.readText() (permission-gated), and
-        // those long-parked Asyncify sleeps overlapping fiber swaps are the
-        // "index out of bounds" crash family (see docs/features/async/). Answer
-        // optimistically from the synchronous capability probe instead; the
-        // real (user-gesture-gated) read happens in GetData().
+        // js_clipboardHasText(): that suspends the caller for up to 2 s
+        // awaiting navigator.clipboard.readText() (permission-gated) on every
+        // poll — and some callers are plain entries that cannot suspend at
+        // all (SuspendError). Answer optimistically from the synchronous
+        // capability probe instead; the real (user-gesture-gated) read
+        // happens in GetData().
         return js_isClipboardAPIAvailable() != 0;
     }
 
@@ -328,15 +382,18 @@ bool wxClipboard::GetData(wxDataObject& data)
         // Try to get from browser clipboard first
         if (js_isClipboardAPIAvailable())
         {
-            char* browserText = js_readTextFromClipboard();
+            char* browserText = wxClipboardReadText();
             if (browserText != nullptr)
             {
                 text = wxString::FromUTF8(browserText);
                 free(browserText);
-                gotFromBrowser = true;
 
-                // Update local cache
-                m_textCache = text;
+                // An EMPTY browser read is a miss, not a result: it is what
+                // a cleared clipboard (or our own failed write) looks like,
+                // and must not shadow a fresh local cache.
+                gotFromBrowser = !text.IsEmpty();
+                if (gotFromBrowser)
+                    m_textCache = text;
             }
         }
 
@@ -378,7 +435,7 @@ void wxClipboard::Clear()
     // Try to clear browser clipboard
     if (js_isClipboardAPIAvailable())
     {
-        js_clearClipboard();
+        wxClipboardClear();
     }
 }
 

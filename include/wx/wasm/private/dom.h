@@ -68,6 +68,24 @@ inline wxString wxDomGetValue(int domId)
     return result;
 }
 
+// Caret/selection of an <input>/<textarea>. The getters return -1 when the
+// element doesn't exist or doesn't support text selection (e.g. a <select>),
+// so callers can fall back to their C++-side cache.
+inline int wxDomGetSelectionStart(int domId)
+{
+    return EM_ASM_INT({ return wxDomGetSelectionStart($0); }, domId);
+}
+
+inline int wxDomGetSelectionEnd(int domId)
+{
+    return EM_ASM_INT({ return wxDomGetSelectionEnd($0); }, domId);
+}
+
+inline void wxDomSetSelection(int domId, int start, int end)
+{
+    EM_ASM({ wxDomSetSelection($0, $1, $2); }, domId, start, end);
+}
+
 inline void wxDomSetEnabled(int domId, bool enabled)
 {
     EM_ASM({ wxDomSetEnabled($0, $1); }, domId, enabled);
@@ -149,15 +167,17 @@ inline void wxDomSetItemSelected(int domId, int index, bool selected)
     EM_ASM({ wxDomSetItemSelected($0, $1, $2); }, domId, index, selected);
 }
 
+// Row index of a listbox/checklist under a point in the control's client
+// coordinates, -1 for none (wxListBox::HitTest).
+inline int wxDomListHitTest(int domId, int x, int y)
+{
+    return EM_ASM_INT({ return wxDomListHitTest($0, $1, $2); }, domId, x, y);
+}
+
 inline bool wxDomIsItemSelected(int domId, int index)
 {
     return EM_ASM_INT({ return wxDomIsItemSelected($0, $1) ? 1 : 0; },
                       domId, index) != 0;
-}
-
-inline int wxDomListHitTest(int domId, int x, int y)
-{
-    return EM_ASM_INT({ return wxDomListHitTest($0, $1, $2); }, domId, x, y);
 }
 
 // width/height are the wx bitmap dimensions: images load asynchronously,
@@ -259,6 +279,17 @@ inline void wxDomSetShown(int domId, bool shown)
 inline void wxDomFocus(int domId)
 {
     EM_ASM({ wxDomFocus($0); }, domId);
+}
+
+// Browser focus must FOLLOW wx focus in both directions: wxDomFocus above
+// moves it onto a DOM-backed control; this drops it when wx focus moves to a
+// canvas-drawn window (a wx-dom control that kept document.activeElement
+// after a canvas click would otherwise own every keystroke — the keyboard
+// callback hands keys to a focused DOM editable). Only wx-dom controls are
+// blurred; page-level inputs outside wx are left alone.
+inline void wxDomBlurActive()
+{
+    EM_ASM({ if (typeof wxDomBlurActive === 'function') wxDomBlurActive(); });
 }
 
 // CSS font string — the port's wxFont native info desc IS a CSS font.

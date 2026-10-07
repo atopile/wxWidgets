@@ -28,6 +28,15 @@ public:
     wxApp();
     virtual ~wxApp();
 
+#if wxUSE_EXCEPTIONS
+    // Browser-port contract: an exception escaping an event handler must NOT
+    // tear down the app (the base default exits the main loop, which in the
+    // browser reads as a silent clean shutdown mid-session). Parity with the
+    // pre-EH builds, where the throw escaped to the JS dispatch boundary and
+    // was contained there. Surface it, keep running.
+    virtual bool OnExceptionInMainLoop() wxOVERRIDE;
+#endif
+
     // deferGLCanvasWindows: skip a synchronous repaint of any non-main window hosting a
     // wxGLCanvas (the 3D viewer, whose paint runs the multi-threaded CPU raytracer). Used
     // on the mouse-button repaint path (HandleMouseEvent), which is driven synchronously
@@ -47,6 +56,11 @@ public:
 
     // Internal use only
     wxWasmDisplay* GetDisplay() { return m_display; }
+
+    // Clears the parked-motion coalescing flag before the base drain, so
+    // the next motion that arrives while a chain is parked is queued again
+    // (see HandleMouseEvent's parked branch).
+    virtual void ProcessPendingEvents() wxOVERRIDE;
 
     bool HandleKeyEvent(wxKeyEvent *event);
     void HandleMouseEvent(wxMouseEvent *event);
@@ -75,6 +89,12 @@ private:
 
     // Mouse
     wxMouseState m_mouseState;
+
+    // True while ONE wxEVT_MOTION has been queued for a parked dispatch
+    // chain and no ProcessPendingEvents() drain has run since (motion is
+    // coalesced while parked; buttons are queued 1:1). Self-healing: every
+    // drain clears it, not the event's consumption.
+    bool m_parkedMotionQueued;
 
     friend class wxDropSource;
 };

@@ -1,8 +1,8 @@
 /////////////////////////////////////////////////////////////////////////////
 // Name:        src/wasm/dialog.cpp
-// Purpose:     wxDialog implementation for WASM using Asyncify for modal dialogs
+// Purpose:     wxDialog implementation for WASM using JSPI for modal dialogs
 // Author:      Robert Roebling, Vaclav Slavik (original univ)
-//              Adam Hilss (WASM port), extended for Asyncify
+//              Adam Hilss (WASM port), extended for suspending modals
 // Copyright:   (c) 2001 SciTech Software, Inc. (www.scitechsoft.com)
 //              (c) 2022 Adam Hilss
 // Licence:     wxWindows licence
@@ -13,9 +13,10 @@
 // wxWidgets event loop approach doesn't work in WASM (JavaScript is
 // single-threaded and cannot truly block).
 //
-// ShowModal() and EndModal() use Emscripten Asyncify to suspend the C++ stack,
-// run a JavaScript event loop that processes wxWidgets events via setTimeout,
-// and resume when the dialog is closed.
+// ShowModal() registers a "modal" wait with the scheduler shim and
+// JSPI-suspends the C++ stack on it; EndModal() resolves the innermost
+// registered wait and the stack resumes (docs/features/async/17 S4). The
+// top-level tick is the sole event dispatcher while the modal is open.
 
 // ============================================================================
 // declarations
@@ -38,6 +39,9 @@
 
 #include "wx/evtloop.h"
 #include "wx/modalhook.h"
+#include "wx/wasm/private/dispatch.h"
+#include "wx/wasm/private/mailbox.h"
+#include "wx/wasm/private/yieldwait.h"
 
 #include <emscripten.h>
 #include <cstdio>
@@ -163,6 +167,19 @@ bool wxDialog::Show(bool show)
     if (show && CanDoLayoutAdaptation())
         DoLayoutAdaptation();
 
+    // Native ports centre dialogs created at wxDefaultPosition (the window
+    // manager / CW_USEDEFAULT does it for them); this port maps
+    // wxDefaultPosition to a literal (0, 0) (nonownedwnd.cpp) with no platform
+    // placement, dropping every unpositioned dialog in the top-left corner.
+    // That was masked for years by DIALOG_SHIM::Show unconditionally
+    // re-centring while wxDisplay::GetFromWindow() returned wxNOT_FOUND here;
+    // with the display lookup fixed, provide the native default ourselves:
+    // centre (on the display, matching the old visual behavior) any dialog
+    // still at the default spot when first shown. A dialog whose position was
+    // restored or set explicitly is not at (0, 0) and is left alone.
+    if ( show && !IsShown() && GetPosition() == wxPoint(0, 0) )
+        Centre();
+
     bool ret = wxDialogBase::Show(show);
 
     if ( show )
@@ -177,96 +194,8 @@ bool wxDialog::IsModal() const
 }
 
 // ----------------------------------------------------------------------------
-// WASM-specific modal implementation using Asyncify
+// WASM-specific modal implementation using JSPI
 // ----------------------------------------------------------------------------
-
-// JavaScript function that implements the modal event loop using Asyncify.
-// This function:
-// 1. Starts a setTimeout-based event loop that calls ProcessEvents
-// 2. Returns a Promise that resolves when endModal() is called
-// 3. Asyncify suspends the C++ stack until the Promise resolves
-//
-// Note: When consecutive modals run (e.g. wizard pages), the second modal's
-// asyncify operation starts inside the first modal's doRewind. This is an
-// inherent limitation of Emscripten's asyncify — the errors are non-fatal
-// and both modals complete correctly. The try/catch in the event loop
-// prevents cascading errors after the asyncify state corruption.
-//
-// The setTimeout callback is async because ccall('ProcessEvents', …,
-// {async:true}) returns a Promise whenever ProcessEvents asyncify-suspends
-// (e.g. a tool coroutine yields).  Without `await`, that Promise rejects
-// with the "unwind" sentinel after the callback returns, surfacing as an
-// "Uncaught (in promise) unwind" page error in Chrome; with `await`, the
-// try/catch sees the rejection and stops the loop cleanly.
-EM_ASYNC_JS(int, startModal, (int aCancelCode), {
-    var timer = null;
-    var stopped = false;
-    var tickCount = 0;
-    var finish = null;   // resolves THIS modal exactly once
-
-    var runEventLoop = function () {
-        if (stopped) return;
-        timer = setTimeout(async function () {
-            if (stopped) return;
-            tickCount++;
-            try {
-                await ccall('ProcessEvents', 'void', [], [], { async: true });
-            } catch (e) {
-                // The pump must NEVER stop without resolving: a stopped pump
-                // with an unresolved promise leaves this ShowModal parked
-                // forever (silent stall). Cancel the modal instead, loudly.
-                console.error('[wxWasm] modal event pump error - cancelling modal: ' + e +
-                              '\nSTACK: ' + (e && e.stack));
-                if (finish) finish(aCancelCode);
-                return;
-            }
-            if (!stopped) runEventLoop();
-        }, 17);
-    };
-
-    // EndModal resolves the INNERMOST live modal (LIFO), matching wx modal
-    // semantics. The previous single-slot resolver (Module._endModal = fn,
-    // delete after use) lost the middle resolver with 3+ nested modals: its
-    // EndModal resolved nothing and its ShowModal parked forever.
-    Module._wxModalResolvers = Module._wxModalResolvers || [];
-    if (typeof Module._endModal !== 'function') {
-        Module._endModal = function(code) {
-            var stack = Module._wxModalResolvers;
-            if (stack && stack.length) {
-                (stack.pop())(code);
-            } else {
-                Module._pendingModalResult = code;
-            }
-        };
-    }
-
-    // EndModal fired before this loop started (stored as pending): consume it.
-    if (Module._pendingModalResult !== undefined) {
-        var pending = Module._pendingModalResult;
-        delete Module._pendingModalResult;
-        return pending;
-    }
-
-    const result = await new Promise((resolve) => {
-        finish = function(code) {
-            if (stopped) return;   // resolve exactly once
-            stopped = true;
-            if (timer !== null) {
-                clearTimeout(timer);
-                timer = null;
-            }
-            // Self-cancel paths must remove our own entry (we may not be top
-            // of the stack if an inner modal is open above us).
-            var idx = Module._wxModalResolvers.indexOf(finish);
-            if (idx !== -1) Module._wxModalResolvers.splice(idx, 1);
-            resolve(code);
-        };
-        Module._wxModalResolvers.push(finish);
-        runEventLoop();
-    });
-
-    return result;
-});
 
 int wxDialog::ShowModal()
 {
@@ -286,18 +215,36 @@ int wxDialog::ShowModal()
         m_parent = parent;
     }
 
+    // The modal is a registered WAIT begun BEFORE Show(true) — an EndModal
+    // running synchronously inside Show() resolves the wait early and
+    // wxWasmYieldUntil returns immediately (doc 17 S4). No modal pump exists:
+    // the top-level tick is the sole dispatcher (dialogs on the DOM port are
+    // real HTML, so they render without a paint loop even pre-main-loop).
+    const int waitToken = wxWasmBeginWait("modal");
+
+    // Token 0 = the scheduler refused the wait (dead or terminal instance):
+    // never show a modal that no EndModal can ever dismiss. Cancel matches
+    // the containment convention (wxWasmExitNestedLoop / the shim's error
+    // containment both resolve modals with wxID_CANCEL).
+    if (waitToken <= 0)
+    {
+        SetReturnCode(wxID_CANCEL);
+        return wxID_CANCEL;
+    }
+
     m_isShowingModal = true;
     Show(true);
 
-    // Check if EndModal was called during Show(true)
-    if ( !m_isShowingModal )
-    {
-        return GetReturnCode();
-    }
-
-    // Call the Asyncify-based modal event loop
-    // This suspends the C++ stack until endModal() is called from EndModal()
-    int result = startModal(wxID_CANCEL);
+    // Suspend the C++ stack until EndModal() resolves it.
+    //
+    // The opener's dispatch chain suspends here for the modal's whole
+    // lifetime; the legitimate dispatcher keeps running meanwhile, so zero
+    // the dispatch interlock for that whole span (manual save/restore:
+    // wxWasmDispatchRestore centralizes the erased-guard reporting).
+    const int savedDispatchDepth = wxWasmDispatchDepth;
+    wxWasmDispatchDepth = 0;
+    const int result = wxWasmYieldUntil(waitToken);
+    wxWasmDispatchRestore(savedDispatchDepth, "ShowModal");
 
     return result;
 }
@@ -323,16 +270,9 @@ void wxDialog::EndModal(int retCode)
 
     m_isShowingModal = false;
 
-    // Resolve the modal promise via Module._endModal callback.
-    // If _endModal isn't set yet (EndModal called before startModal's event
-    // loop started), store the result as pending so ShowModal can pick it up.
-    EM_ASM({
-        if (typeof Module._endModal === 'function') {
-            Module._endModal($0);
-        } else {
-            Module._pendingModalResult = $0;
-        }
-    }, retCode);
+    // Resolve the innermost registered modal wait (wx LIFO semantics). A
+    // resolve racing ahead of ShowModal's park pre-resolves the promise.
+    wxWasmResolveTopWait("modal", retCode);
 
     Show(false);
 
